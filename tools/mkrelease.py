@@ -35,6 +35,7 @@ def build(root, out, version):
 
     shared = [(p, "/bs/" + p) for p in lua_files(root, "lib") + lua_files(root, "install")]
     shared.append(("roles/_common/startup.lua", "/startup.lua"))
+    shared.append(("roles/_common/setup.lua", "/setup.lua"))
     # vendored libraries live at /bs/<name>/ so `require "ccryptolib.aead"` works in-game
     shared += [(p, "/bs/" + p[len("vendor/"):]) for p in lua_files(root, "vendor")]
     roles = sorted(d for d in os.listdir(os.path.join(root, "roles"))
@@ -103,8 +104,8 @@ def write_bundle(out):
         f.write("".join(parts))
 
 
-BUNDLE_HEAD = """-- BuildKit release bundle. Drag this file onto a computer, then run:  buildkit <role>
--- (run it with no role to see the list). It unpacks itself, installs that role, then cleans up.
+BUNDLE_HEAD = """-- BuildKit release bundle. Drag this file onto a computer, then run:  buildkit
+-- It unpacks itself and opens the setup screen (or: buildkit <role> to install without the screen).
 local args = { ... }
 local F = {}
 """
@@ -128,13 +129,14 @@ if args[1] == "unpack" then
 elseif args[1] then
   ok = shell.run(DIR .. "/install/install.lua", args[1])
 else
-  ok = shell.run(DIR .. "/install/install.lua")
+  -- no role given: open the click-to-install setup screen
+  ok = shell.run(DIR .. "/install/setup.lua")
 end
 if ok and fs.exists("/bs/.version") and not fs.exists("/bs/.installing") then
   fs.delete(DIR)
   print("Release files cleaned up.")
 else
-  print("Install did not finish. Fix the problem above, drag buildkit.lua on again and re-run.")
+  print("Nothing was installed. Release files are still in " .. DIR .. " (run " .. DIR .. "/install/setup).")
 end
 """
 

@@ -65,11 +65,12 @@ function fake_nbt.new(opts)
     if size(tbl) > limit then return nil, "NBT data is too large" end
     stored = copy(tbl)
     ctl.writes = ctl.writes + 1
+    if opts.quiet then return end -- some versions return nothing on success
     return true
   end
 
   local periph = {}
-  function periph.read()
+  periph[opts.reader or "read"] = function()
     if ctl.failNext > 0 then ctl.failNext = ctl.failNext - 1; error("peripheral detached") end
     ctl.reads = ctl.reads + 1
     if ctl.readGarbage then return ctl.readGarbage end

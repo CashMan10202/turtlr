@@ -21,7 +21,14 @@ local function methods(env, name)
 end
 
 local NBT = { "nbtStorage", "nbt_storage" }
-local NBT_WRITERS = { "writeTable", "writeJson", "save" }
+local NBT_READERS = { "load", "read" }
+local NBT_WRITERS = { "save", "writeTable", "writeJson" }
+
+local function nbtReader(set)
+  for _, m in ipairs(NBT_READERS) do
+    if set[m] then return m end
+  end
+end
 
 local function nbtWriter(set)
   for _, m in ipairs(NBT_WRITERS) do
@@ -94,8 +101,8 @@ core.checks = {
     local name, ty = find(env, NBT)
     if not name then return "SKIP", "none attached" end
     local set, listed = methods(env, name)
-    local writer = nbtWriter(set)
-    if set.read and writer then return "PASS", "read + " .. writer end
+    local reader, writer = nbtReader(set), nbtWriter(set)
+    if reader and writer then return "PASS", reader .. " + " .. writer end
     return "FAIL", ty .. " has: " .. listed
   end },
 
@@ -105,15 +112,18 @@ core.checks = {
     if not env.flags.nbtWrite then return "SKIP", "run with --nbt-write on an EMPTY device to measure" end
     local dev = env.peripheral.wrap(name)
     local set = methods(env, name)
-    local writer = nbtWriter(set)
-    if not (set.read and writer) then return "FAIL", "no usable read/write methods" end
-    local current = dev.read()
+    local reader, writer = nbtReader(set), nbtWriter(set)
+    if not (reader and writer) then return "FAIL", "no usable read/write methods" end
+    local current = dev[reader]()
     if type(current) == "table" and next(current) ~= nil then return "SKIP", "device is not empty; not touching it" end
     local function try(n)
       local payload = ("x"):rep(n)
       local arg = writer == "writeJson" and ('{"d":"' .. payload .. '"}') or { d = payload }
       local ok, res = pcall(dev[writer], arg)
-      return ok and res ~= nil and res ~= false
+      if not ok or res == false then return false end
+      -- do not trust the return value: read it back and see whether it really was stored
+      local back = dev[reader]()
+      return type(back) == "table" and type(back.d) == "string" and #back.d == n
     end
     if not try(16) then return "FAIL", writer .. " refused even 16 characters" end
     local lo, hi = 16, 1100000 -- lo is known good, hi is the most we will try
@@ -126,7 +136,7 @@ core.checks = {
       end
     end
     pcall(dev[writer], writer == "writeJson" and "{}" or {})
-    return "PASS", "largest payload accepted: " .. lo .. " characters (via " .. writer .. ")"
+    return "PASS", "largest payload accepted: " .. lo .. " characters (via " .. reader .. "/" .. writer .. ")"
   end },
 
   { id = "geo.api", desc = "Geo Scanner (--scan to time a radius-16 scan)", run = function(env)

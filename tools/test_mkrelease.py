@@ -37,6 +37,8 @@ class MkReleaseTest(unittest.TestCase):
             self.assertEqual(dests.get("/startup.lua"), "roles/_common/startup.lua")
             self.assertEqual(dests.get("/bs/role/config.lua"), "roles/%s/config.lua" % role)
             self.assertIn("/bs/install/installer_core.lua", dests)
+            self.assertEqual(dests.get("/setup.lua"), "roles/_common/setup.lua")
+            self.assertIn("/bs/install/setup.lua", dests)
             self.assertEqual(dests.get("/bs/ccryptolib/aead.lua"), "vendor/ccryptolib/aead.lua")
             self.assertIn("/bs/ccryptolib/internal/util.lua", dests)
             for dest in dests:
@@ -85,6 +87,10 @@ local env = setmetatable({ fs = e.fs, print = function() end,
 e.write("/buildkit.lua", src)
 assert(load(src, "=bundle", "t", env))("gps")
 assert(ran == "/bs-release/install/install.lua gps", ran)
+-- with no role it opens the setup screen instead
+e.write("/buildkit.lua", src)
+assert(load(src, "=bundle", "t", env))()
+assert(ran == "/bs-release/install/setup.lua", ran)
 local function walk(dir)
   for _, name in ipairs(e.fs.list(dir)) do
     local p = dir .. "/" .. name

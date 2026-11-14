@@ -21,6 +21,21 @@ function T.round_trip_in_every_write_style()
   end
 end
 
+function T.real_advanced_peripherals_names_load_and_save()
+  -- seen in-game on AP 0.7 for 1.21.1: methods are load/save; save may return nothing
+  for _, quiet in ipairs({ true, false }) do
+    local p, ctl = fake_nbt.new({ style = "save", reader = "load", quiet = quiet, limit = 100 })
+    local d = assert(device.wrap("nbt_storage_0", p, { "setName", "getConfiguration", "getName", "load", "save" }))
+    t.ok(d.store({ c1 = "abc" }))
+    t.eq(d.load(), { c1 = "abc" })
+    t.eq(d.errors, 0)
+    t.eq(d.store({ c1 = ("x"):rep(200) }), nil)
+    t.eq(d.load(), { c1 = "abc" })
+    ctl.fail(1)
+    t.eq(d.store({ c1 = "z" }), nil)
+  end
+end
+
 function T.wrap_needs_read_and_a_writer()
   t.eq(device.wrap("x", { read = function() end }, { "read" }), nil)
   t.eq(device.wrap("x", { writeTable = function() end }, { "writeTable" }), nil)

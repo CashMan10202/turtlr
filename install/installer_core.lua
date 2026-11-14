@@ -13,7 +13,7 @@ local function safeDest(dest)
   for part in dest:gmatch("[^/]+") do
     if part == ".." or part == "." then return false end
   end
-  if dest == "/startup.lua" then return true end
+  if dest == "/startup.lua" or dest == "/setup.lua" then return true end
   if dest:sub(1, #STAGING) == STAGING then return false end
   return dest:sub(1, 4) == "/bs/" and #dest > 4
 end

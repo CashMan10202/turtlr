@@ -81,6 +81,21 @@ function T.nbt_size_probe_finds_the_limit_and_cleans_up()
   t.eq(dev.read(), {})
 end
 
+function T.real_nbt_method_names_pass_and_can_be_measured()
+  local fake_nbt = require("test.fake_nbt")
+  local e, ev = env({ nbtWrite = true })
+  local p = fake_nbt.new({ style = "save", reader = "load", quiet = true, limit = 5000 })
+  p.setName, p.getName, p.getConfiguration = function() end, function() end, function() end
+  e.attach("nbt_storage_0", "nbt_storage", p)
+  local r = byId(core.runAll(ev))
+  t.eq(r["nbt.api"].status, "PASS")
+  t.ok(r["nbt.api"].detail:find("load + save", 1, true), r["nbt.api"].detail)
+  t.eq(r["nbt.size"].status, "PASS")
+  -- the fake counts key + value characters: "d" + 4999
+  t.ok(r["nbt.size"].detail:find("4999", 1, true), r["nbt.size"].detail)
+  t.eq(p.load(), {})
+end
+
 function T.nbt_size_probe_handles_devices_that_throw()
   local e, ev = env({ nbtWrite = true })
   local stored = {}

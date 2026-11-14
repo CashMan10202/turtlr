@@ -4,7 +4,9 @@
 local device = {}
 
 local TYPES = { nbtStorage = true, nbt_storage = true }
-local WRITERS = { "writeTable", "writeJson", "save" }
+-- Method names differ between Advanced Peripherals versions. Seen in-game on 1.21.1: load / save.
+local READERS = { "load", "read" }
+local WRITERS = { "save", "writeTable", "writeJson" }
 
 local function toJson(cells)
   local parts = {}
@@ -22,13 +24,17 @@ function device.wrap(name, periph, methodNames)
   for _, m in ipairs(WRITERS) do
     if has[m] then writer = m; break end
   end
-  if not has.read or not writer then return nil, name .. ": no usable read/write methods" end
+  local reader
+  for _, m in ipairs(READERS) do
+    if has[m] then reader = m; break end
+  end
+  if not reader or not writer then return nil, name .. ": no usable read/write methods" end
 
-  local D = { name = name, errors = 0, junk = 0, writer = writer }
+  local D = { name = name, errors = 0, junk = 0, writer = writer, reader = reader }
 
   -- Returns the cells table, or nil plus an error.
   function D.load()
-    local ok, data = pcall(periph.read)
+    local ok, data = pcall(periph[reader])
     if not ok then
       D.errors = D.errors + 1
       return nil, tostring(data)
@@ -48,7 +54,9 @@ function device.wrap(name, periph, methodNames)
   function D.store(cells)
     local arg = writer == "writeJson" and toJson(cells) or cells
     local ok, res, err = pcall(periph[writer], arg)
-    if ok and res then return true end
+    -- success is "did not throw, did not return false, did not return nil plus a message"
+    -- (some versions return nothing at all on success; the engine reads back to be sure)
+    if ok and res ~= false and not (res == nil and err ~= nil) then return true end
     D.errors = D.errors + 1
     return nil, tostring(ok and (err or "write refused") or res)
   end

@@ -1,19 +1,25 @@
-# In-game test walkthrough (Phases 1 and 2)
+# In-game setup and test (button version)
 
-Everything you type is in a code box. Type it on the computer's screen and press Enter.
+Everything is done from one setup screen with buttons. The **green button is always the next step**.
+Click buttons with the mouse, or press the number shown on them. `q` goes back.
 
-## 0. Get the file
+## Get the setup screen onto a computer
 
-Download `buildkit.lua` (one file, about 320 KB) to your PC. It contains the whole release.
+1. Open the computer's screen in Minecraft.
+2. Drag `buildkit.lua` from your PC onto the Minecraft window.
+3. Type:
 
-**Putting it on a computer:** open the computer's screen in Minecraft, then drag `buildkit.lua`
-from your PC's file explorer onto the Minecraft window. The computer says it received the file.
-Do this on each computer you set up (the file deletes itself after use to free space).
+```
+buildkit
+```
 
-If dragging does not work on your server, tell me; the fallback is your friend uploading files
-through Crafty (`docs/phase1-deploy.md`).
+The setup screen opens. Later, on a computer that is already installed, just type:
 
-## 1. Build this
+```
+setup
+```
+
+## What to build first
 
 ```
  [NBT] [NBT] [NBT]        each NBT Storage has a WIRED modem on it
@@ -23,119 +29,43 @@ through Crafty (`docs/phase1-deploy.md`).
                            wireless modem              wireless modem
 ```
 
-- **A** and **B**: advanced computers. Put a wireless modem on each.
-- **A** also gets a wired modem, cabled to a wired modem on each NBT Storage (start with 2 or 3, all empty).
-- **Right-click every wired modem** so its ring turns red. This is the step people miss.
-- Put one **disk drive touching both A and B**, with a blank floppy in it. Both computers can then use it.
+Right-click every wired modem so its ring turns red. Put a blank floppy in the disk drive.
 
-## 2. Computer A (storage)
+## Computer A (storage): press the green button each time
 
-Drag `buildkit.lua` onto A, then:
+1. **Install a role** -> click **storage**
+2. **Check this computer** -> **Check + NBT size** (only while the NBT Storage is still empty). Screenshot.
+3. **Make new keys** -> mash the keyboard, press Enter
+4. **Load keys (storage)**
+5. **Reboot (start program)**
 
-```
-buildkit storage
-```
+It should then say `Storage manager 1: 3 NBT Storage blocks. Running.`
 
-```
-label set storage1
-```
+## Computer B (compute)
 
-Check the mods (the NBT Storage must still be empty for this):
+1. **Install a role** -> click **compute**
+2. **Load keys (compute)** (do NOT make new keys again)
+3. **Test storage** -> you want eight green `[PASS]` lines. Screenshot.
 
-```
-/bs/install/verify --nbt-write
-```
+## Turtle and pocket
 
-Take a screenshot of the result. Then make the secret keys (mash the keyboard when asked, then Enter):
+Drag `buildkit.lua` on, type `buildkit`, then:
 
-```
-/bs/install/mkkeys
-```
+- Turtle (fuel, Geo Scanner equipped, chest in front): **Install a role** -> **worker**, then **Check this computer** -> **Check + area scan**
+- Pocket: **Install a role** -> **pocket**, then **Check this computer** -> **Check + pixel test**
 
-```
-/bs/install/mkkeys load storage
-```
+## Send me
 
-```
-reboot
-```
-
-A should now show: `Storage manager 1: 3 NBT Storage blocks. Running.` Leave it running.
-
-## 3. Computer B (compute)
-
-Drag `buildkit.lua` onto B, then:
-
-```
-buildkit compute
-```
-
-```
-label set compute
-```
-
-```
-/bs/install/mkkeys load compute
-```
-
-Wait about 10 seconds after A started, then:
-
-```
-/bs/install/storetest
-```
-
-You want eight green `[PASS]` lines. Screenshot it; the times on the two "100 KB" lines matter to me.
-
-(If you reboot B it will say it cannot start `main.lua`. That is expected until Phase 4.)
-
-## 4. Three quick experiments
-
-1. **Reboot:** on A hold Ctrl+R to reboot it, wait 10 seconds, run `storetest` on B again. Still all green.
-2. **Break a block:** break one NBT Storage and place it back (it comes back empty). Run `storetest`:
-   still all green. The `health` line shows `degraded` above 0, and returns to 0 within 30 minutes.
-3. **Turn A off:** hold Ctrl+S on A. `storetest` on B now fails with `timeout`. Turn A back on, wait
-   10 seconds, and it passes again.
-
-## 5. Turtle and pocket checks (Phase 1 leftovers)
-
-**Turtle** (advanced turtle with some fuel, a Geo Scanner equipped, a chest in front of it). Drag `buildkit.lua` on, then:
-
-```
-buildkit worker
-```
-
-```
-/bs/install/verify --scan
-```
-
-Watch whether the game stutters during the scan. Screenshot the result.
-
-**Pocket computer** (advanced, ender modem). Drag `buildkit.lua` on, then:
-
-```
-buildkit pocket
-```
-
-```
-/bs/install/verify --gfx
-```
-
-It should draw a short diagonal line of coloured dots and return to text. If the screen breaks, hold Ctrl+R.
-
-## 6. Send me
-
-- Screenshots of: `verify` on A, `storetest` on B, `verify` on the turtle, `verify` on the pocket.
-- Whether the scan lagged the server.
-- Anything that printed in red.
+Screenshots of the check on A, the storage test on B, and the turtle and pocket checks.
 
 ## If something goes wrong
 
 | You see | Do this |
 |---|---|
-| `No such program` after dragging | Type `ls`. If `buildkit.lua` is not listed the drag did not arrive; try again with the computer screen open |
-| `Install failed ... not enough free space` | The computer's disk is too small; tell me the number it printed |
-| `no NBT Storage found` | A wired modem is not switched on (right-click it), or a cable is missing |
-| `/bs/keys.lua: missing` | Run the `mkkeys load ...` line for that computer |
-| `health ... timeout` in storetest | A is not running, or the two computers loaded keys from different floppies, or a wireless modem is missing |
-| `put ... io` in storetest | The NBT Storage refused the write: send me the `verify --nbt-write` screenshot |
-| `Program crashed` | On that computer run `edit /bs/crash.log` and screenshot it |
+| `No such program` after dragging | Type `ls`. If `buildkit.lua` is not listed, the drag did not arrive: try again with the computer screen open |
+| No "Make new keys" or "Load keys" button | No floppy found: put one in a disk drive touching this computer |
+| "Load keys" missing but "Make new keys" shown on the 2nd computer | The floppy in the drive is not the one you made keys on |
+| `no NBT Storage found` after reboot | A wired modem is not switched on (right-click it), or a cable is missing |
+| `health ... timeout` in the storage test | Computer A is not running, or a wireless modem is missing |
+| `put ... io` in the storage test | Screenshot the "Check + NBT size" result and send it to me |
+| `Program crashed` | Run `edit /bs/crash.log` on that computer and screenshot it |

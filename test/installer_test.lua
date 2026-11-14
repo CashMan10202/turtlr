@@ -135,6 +135,14 @@ function T.stale_staging_is_cleared()
   t.ok(not e.fs.exists("/bs/lib/junk.lua"))
 end
 
+function T.setup_shortcut_destination_is_allowed()
+  local e, fetch = setup()
+  local m = manifest()
+  m.roles.gps[1].dest = "/setup.lua"
+  t.ok(core.install(e.fs, fetch, m, "gps"))
+  t.ok(e.fs.exists("/setup.lua"))
+end
+
 function T.unsafe_destinations_are_refused()
   local e, fetch = setup()
   for _, dest in ipairs({ "/rom/x.lua", "/bs/../rom/x", "/disk/x.lua", "relative.lua", "/bs/.staging/x" }) do
