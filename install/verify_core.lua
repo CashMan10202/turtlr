@@ -159,14 +159,16 @@ core.checks = {
     local name, ty = find(env, { "geoScanner", "geo_scanner" })
     if not name then return "SKIP", "none attached" end
     local set, listed = methods(env, name)
-    if not set.scan then return "FAIL", ty .. " has no scan; methods: " .. listed end
-    if not env.flags.scan then return "PASS", ty .. ": " .. listed end
+    -- the method is scanBlocks on newer Advanced Peripherals, scan on older ones
+    local method = set.scanBlocks and "scanBlocks" or set.scan and "scan"
+    if not method then return "FAIL", ty .. " has no scan method; methods: " .. listed end
+    if not env.flags.scan then return "PASS", ty .. " (" .. method .. "): " .. listed end
     local start = env.os.epoch("utc")
-    local blocks, err = env.peripheral.call(name, "scan", 16)
+    local blocks, err = env.peripheral.call(name, method, 16)
     local ms = env.os.epoch("utc") - start
-    if type(blocks) ~= "table" then return "FAIL", "scan(16) failed: " .. tostring(err) end
+    if type(blocks) ~= "table" then return "FAIL", method .. "(16) failed: " .. tostring(err) end
     local sample = blocks[1] and blocks[1].name or "?"
-    return "PASS", ("scan(16): %d blocks in %d ms; first: %s"):format(#blocks, ms, tostring(sample))
+    return "PASS", ("%s(16): %d blocks in %d ms; first: %s"):format(method, #blocks, ms, tostring(sample))
   end },
 
   apiCheck("me.api", "ME Bridge can list and craft items", { "meBridge", "me_bridge" },

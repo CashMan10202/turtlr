@@ -161,6 +161,18 @@ function T.geo_me_and_detector_method_checks()
   t.eq(r["pd.api"].status, "FAIL") -- no position method
 end
 
+function T.real_geo_scanner_uses_scanBlocks()
+  -- seen in-game on Advanced Peripherals 0.8.2a: type geo_scanner, method scanBlocks
+  local e, ev = env({ scan = true })
+  local asked
+  e.attach("right", "geo_scanner", { scanBlocks = function(r) asked = r; return { { name = "minecraft:stone" } } end,
+    chunkAnalyze = function() end, getFuelLevel = function() end })
+  local r = byId(core.runAll(ev))
+  t.eq(r["geo.api"].status, "PASS")
+  t.eq(asked, 16)
+  t.ok(r["geo.api"].detail:find("scanBlocks(16): 1 blocks", 1, true), r["geo.api"].detail)
+end
+
 function T.geo_scan_error_is_reported()
   local e, ev = env({ scan = true })
   e.attach("g", "geoScanner", { scan = function() return nil, "Radius is too big" end })
