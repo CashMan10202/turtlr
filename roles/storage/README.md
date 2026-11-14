@@ -4,7 +4,7 @@
 
 **Hardware:** Advanced computer, wired modem network to the NBT Storage blocks, wireless modem. Run at least two.
 
-**Program:** `/bs/role/main.lua`. Files: `device.lua` (one NBT Storage block), `engine.lua` (the replicated store),
+**Program:** `/bs/role/main.lua`. Its modules are installed at `/bs/roles/storage/`: `device.lua` (one NBT Storage block), `engine.lua` (the replicated store),
 `server.lua` (network service, primary/standby, background checks).
 
 **Deploy and test:** `docs/phase2-deploy.md`. **When things break:** `docs/recovery.md`.

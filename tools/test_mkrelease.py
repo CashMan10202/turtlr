@@ -43,6 +43,20 @@ class MkReleaseTest(unittest.TestCase):
                 self.assertTrue(dest.endswith(".lua"), dest)
                 self.assertFalse(dest.startswith("/bs/test/"), dest)
 
+    def test_every_require_resolves_on_the_installed_computer(self):
+        """In-game, require("a.b") loads /bs/a/b.lua. Every module a role's files ask for must be installed."""
+        import re
+        builtin = ("cc.",)
+        for role, entries in self.manifest["roles"].items():
+            dests = {e["dest"] for e in entries}
+            for e in entries:
+                src = open(os.path.join(self.out, e["path"]), encoding="latin-1").read()
+                for mod in re.findall(r'require\s*\(?\s*"([^"]+)"', src):
+                    if mod.startswith(builtin):
+                        continue
+                    want = "/bs/" + mod.replace(".", "/") + ".lua"
+                    self.assertIn(want, dests, "%s (role %s) requires %s" % (e["path"], role, mod))
+
     def test_no_other_roles_files_leak(self):
         for e in self.manifest["roles"]["pocket"]:
             self.assertFalse(e["path"].startswith("roles/compute/"), e["path"])

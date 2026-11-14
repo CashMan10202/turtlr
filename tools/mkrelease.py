@@ -43,7 +43,10 @@ def build(root, out, version):
     manifest = {"version": version, "roles": {}}
     for role in roles:
         prefix = "roles/%s/" % role
-        own = [(p, "/bs/role/" + p[len(prefix):]) for p in lua_files(root, "roles/" + role)]
+        # main.lua and config.lua live at /bs/role/ (same place on every computer);
+        # the role's other modules keep their repo path so require("roles.<role>.<name>") works in-game
+        own = [(p, ("/bs/role/" if p[len(prefix):] in ("main.lua", "config.lua") else "/bs/" + prefix) + p[len(prefix):])
+               for p in lua_files(root, "roles/" + role)]
         entries = []
         for path, dest in shared + own:
             data = open(os.path.join(root, path), "rb").read()
