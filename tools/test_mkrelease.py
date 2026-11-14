@@ -72,6 +72,38 @@ class MkReleaseTest(unittest.TestCase):
         self.assertEqual(int(n), len(self.manifest["roles"]))
         self.assertEqual(sha, self.manifest["roles"]["gps"][0]["sha256"])
 
+    def test_bundle_unpacks_to_identical_files(self):
+        harness = """
+package.path = "./?.lua;" .. package.path
+local shim = require("test.cc_shim")
+local e = shim.new()
+local f = assert(io.open(os.getenv("BUNDLE"))); local src = f:read("*a"); f:close()
+local ran
+local env = setmetatable({ fs = e.fs, print = function() end,
+  shell = { getRunningProgram = function() return "buildkit.lua" end,
+            run = function(...) ran = table.concat({ ... }, " "); return true end } }, { __index = _G })
+e.write("/buildkit.lua", src)
+assert(load(src, "=bundle", "t", env))("gps")
+assert(ran == "/bs-release/install/install.lua gps", ran)
+local function walk(dir)
+  for _, name in ipairs(e.fs.list(dir)) do
+    local p = dir .. "/" .. name
+    if e.fs.isDir(p) then walk(p) else
+      local out = assert(io.open(os.getenv("OUT") .. p:sub(#"/bs-release" + 1), "rb"))
+      assert(out:read("*a") == e.read(p), "differs: " .. p); out:close()
+      io.write(p:sub(#"/bs-release/" + 1), "\\n")
+    end
+  end
+end
+walk("/bs-release")
+"""
+        out = subprocess.check_output(["lua5.2", "-e", harness], cwd=ROOT,
+                                      env=dict(os.environ, BUNDLE=os.path.join(self.out, "buildkit.lua"),
+                                               OUT=self.out)).decode().split()
+        expected = {e["path"] for entries in self.manifest["roles"].values() for e in entries} | {"manifest.lua"}
+        self.assertEqual(set(out), expected)
+        self.assertLess(os.path.getsize(os.path.join(self.out, "buildkit.lua")), 500000)  # CC upload limit 512 KB
+
     def test_installer_itself_is_in_the_release(self):
         self.assertTrue(os.path.exists(os.path.join(self.out, "install", "install.lua")))
 

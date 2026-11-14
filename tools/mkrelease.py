@@ -67,7 +67,76 @@ def build(root, out, version):
     lines.append("} }")
     with open(os.path.join(out, "manifest.lua"), "w", newline="\n") as f:
         f.write("\n".join(lines) + "\n")
+    write_bundle(out)
     return manifest
+
+
+def lua_long_string(text):
+    """Lua long-bracket literal for text, picking a bracket level the text does not contain."""
+    level = 1
+    while "]" + "=" * level + "]" in text:
+        level += 1
+    eq = "=" * level
+    # Lua drops a newline right after the opening bracket, so always add one
+    return "[%s[\n%s]%s]" % (eq, text, eq)
+
+
+def write_bundle(out):
+    """One self-extracting file (buildkit.lua) holding the whole release.
+
+    In-game: drag it onto a computer's screen, then run `buildkit <role>`.
+    """
+    files = []
+    for folder, _dirs, names in os.walk(out):
+        for name in sorted(names):
+            if name.endswith(".lua") and name != "buildkit.lua":
+                rel = os.path.relpath(os.path.join(folder, name), out).replace(os.sep, "/")
+                files.append(rel)
+    parts = [BUNDLE_HEAD]
+    for rel in sorted(files):
+        text = open(os.path.join(out, rel), encoding="latin-1", newline="").read()
+        if "\r" in text:
+            sys.exit("%s contains carriage returns; cannot bundle" % rel)
+        parts.append('F["%s"] = %s\n' % (rel, lua_long_string(text)))
+    parts.append(BUNDLE_TAIL)
+    with open(os.path.join(out, "buildkit.lua"), "w", encoding="latin-1", newline="\n") as f:
+        f.write("".join(parts))
+
+
+BUNDLE_HEAD = """-- BuildKit release bundle. Drag this file onto a computer, then run:  buildkit <role>
+-- (run it with no role to see the list). It unpacks itself, installs that role, then cleans up.
+local args = { ... }
+local F = {}
+"""
+
+BUNDLE_TAIL = """
+local DIR = "/bs-release"
+if fs.exists(DIR) then fs.delete(DIR) end
+for path, text in pairs(F) do
+  local h = fs.open(DIR .. "/" .. path, "w")
+  h.write(text)
+  h.close()
+end
+F = nil
+-- remove this bundle file now: the computer needs the disk space for the install
+local me = shell.getRunningProgram()
+if me and fs.exists(me) then fs.delete(me) end
+local ok
+if args[1] == "unpack" then
+  print("Unpacked to " .. DIR)
+  return
+elseif args[1] then
+  ok = shell.run(DIR .. "/install/install.lua", args[1])
+else
+  ok = shell.run(DIR .. "/install/install.lua")
+end
+if ok and fs.exists("/bs/.version") and not fs.exists("/bs/.installing") then
+  fs.delete(DIR)
+  print("Release files cleaned up.")
+else
+  print("Install did not finish. Fix the problem above, drag buildkit.lua on again and re-run.")
+end
+"""
 
 
 def main():
