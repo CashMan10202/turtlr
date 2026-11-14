@@ -144,11 +144,13 @@ function T.upgrade_skips_files_that_did_not_change()
   src["roles/compute/main.lua"] = "print('compute v2')"
   e.write("/disk/buildservice/roles/compute/main.lua", src["roles/compute/main.lua"])
   -- so little free space that a full re-copy could not fit
-  e.capacity = e.capacity - e.fs.getFreeSpace() + 1024 + #src["roles/compute/main.lua"] + 10
+  -- (the role's config.lua is always fetched too: it is kept beside the user's own as config.lua.new)
+  e.capacity = e.capacity - e.fs.getFreeSpace() + 1024 + #src["roles/compute/main.lua"]
+    + #src["roles/compute/config.lua"] + 10
   local ok, err = core.install(e.fs, counting, manifest(), "compute")
   src["roles/compute/main.lua"] = "print('compute')"
   t.ok(ok, tostring(err))
-  t.eq(fetched, { "roles/compute/main.lua" })
+  t.eq(fetched, { "roles/compute/main.lua", "roles/compute/config.lua" })
   t.eq(e.read("/bs/role/main.lua"), "print('compute v2')")
   t.eq(e.read("/bs/lib/codec.lua"), src["lib/codec.lua"])
 end
