@@ -550,7 +550,12 @@ while true do
   elseif picked.id == "mkkeys" then run("mkkeys")
   elseif picked.id == "loadkeys" then run("mkkeys", "load", state.role)
   elseif picked.id == "storetest" then run("storetest")
-  elseif picked.id == "reboot" then os.reboot()
+  elseif picked.id == "reboot" then
+    -- free the disk space used by the unpacked release before restarting
+    if fs.exists("/bs/.version") and fs.exists("/bs-release") then fs.delete("/bs-release") end
+    clear()
+    print("Rebooting...")
+    os.reboot()
   end
 end
 clear()
@@ -2323,7 +2328,7 @@ end
 return storeclient
 ]=]
 F["manifest.lua"] = [=[
-return { version = "0.2.2", roles = {
+return { version = "0.2.3", roles = {
   ["compute"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
@@ -2341,7 +2346,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2387,7 +2392,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2433,7 +2438,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2479,7 +2484,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2525,7 +2530,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2571,7 +2576,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2617,7 +2622,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2663,7 +2668,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2709,7 +2714,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
@@ -2759,7 +2764,7 @@ return { version = "0.2.2", roles = {
     { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8024, sha256 = "35b5877b4faae329a954facd1093e68a721069cc46ecb8dcd405e08baf02600c" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },

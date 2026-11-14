@@ -223,7 +223,12 @@ while true do
   elseif picked.id == "mkkeys" then run("mkkeys")
   elseif picked.id == "loadkeys" then run("mkkeys", "load", state.role)
   elseif picked.id == "storetest" then run("storetest")
-  elseif picked.id == "reboot" then os.reboot()
+  elseif picked.id == "reboot" then
+    -- free the disk space used by the unpacked release before restarting
+    if fs.exists("/bs/.version") and fs.exists("/bs-release") then fs.delete("/bs-release") end
+    clear()
+    print("Rebooting...")
+    os.reboot()
   end
 end
 clear()

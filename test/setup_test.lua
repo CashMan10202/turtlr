@@ -210,6 +210,8 @@ function T.reboot_button()
   c.click("Reboot")
   c.run()
   t.eq(c.rebooted, true)
+  -- the unpacked release (about 340 KB) must not be left on the disk after a reboot
+  t.ok(not c.e.fs.exists("/bs-release"), "release files left behind")
 end
 
 function T.fits_pocket_and_turtle_screens()
