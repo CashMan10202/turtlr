@@ -35,6 +35,8 @@ def build(root, out, version):
 
     shared = [(p, "/bs/" + p) for p in lua_files(root, "lib") + lua_files(root, "install")]
     shared.append(("roles/_common/startup.lua", "/startup.lua"))
+    # vendored libraries live at /bs/<name>/ so `require "ccryptolib.aead"` works in-game
+    shared += [(p, "/bs/" + p[len("vendor/"):]) for p in lua_files(root, "vendor")]
     roles = sorted(d for d in os.listdir(os.path.join(root, "roles"))
                    if not d.startswith("_") and os.path.isdir(os.path.join(root, "roles", d)))
 

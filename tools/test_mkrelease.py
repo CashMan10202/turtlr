@@ -37,6 +37,8 @@ class MkReleaseTest(unittest.TestCase):
             self.assertEqual(dests.get("/startup.lua"), "roles/_common/startup.lua")
             self.assertEqual(dests.get("/bs/role/config.lua"), "roles/%s/config.lua" % role)
             self.assertIn("/bs/install/installer_core.lua", dests)
+            self.assertEqual(dests.get("/bs/ccryptolib/aead.lua"), "vendor/ccryptolib/aead.lua")
+            self.assertIn("/bs/ccryptolib/internal/util.lua", dests)
             for dest in dests:
                 self.assertTrue(dest.endswith(".lua"), dest)
                 self.assertNotIn("test", dest)

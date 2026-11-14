@@ -1,6 +1,9 @@
 -- Test runner: lua5.2 test/run.lua [pattern]
 -- Runs every test/*_test.lua and test/*/*_test.lua whose path contains pattern.
-package.path = "./?.lua;./?/init.lua;" .. package.path
+package.path = "./?.lua;./?/init.lua;./vendor/?.lua;./test/?.lua;" .. package.path
+-- CC globals that vendored libraries expect to exist
+os.epoch = os.epoch or function() return os.time() * 1000 end
+os.day = os.day or function() return 1 end
 local pattern = arg and arg[1]
 
 local files = {}
