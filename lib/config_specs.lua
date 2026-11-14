@@ -49,7 +49,13 @@ specs.compute = common({
   quoteMinutes = S.int(1, 1440, 15),
 })
 
+local side = function(default)
+  return S.enum({ "top", "bottom", "left", "right", "front", "back" }, default)
+end
+
 specs.incoming = common({
+  extSide = side("top"),  -- side with the ENDER modem (talks to players' devices)
+  busSide = side("back"), -- side with the normal wireless modem (talks to the base)
   frameMax = S.int(512, 8192, proto.LIMITS.frameMax),
   clockSkewSecs = S.int(5, 600, 120),
   rate = rate(5, 60),
@@ -57,6 +63,8 @@ specs.incoming = common({
 })
 
 specs.outgoing = common({
+  extSide = side("top"),
+  busSide = side("back"),
   frameMax = S.int(512, 8192, proto.LIMITS.frameMax),
   queueMax = S.int(8, 4096, 256),
 })

@@ -1,5 +1,7 @@
 -- OUTGOING gateway config.
 return {
+  extSide = "top",  -- side the ENDER modem is on (talks to players' pockets and turtles)
+  busSide = "back", -- side the normal WIRELESS modem is on (talks to your base computers)
   frameMax = 8192, -- biggest message sent, in bytes
   queueMax = 256,  -- most replies waiting to be sent before new ones are dropped
   -- Logging: level is "debug", "info", "warn" or "error"; keepKB is how much log to keep on this computer.

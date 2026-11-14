@@ -14,8 +14,10 @@ local RETRY = { timeout = true, busy = true }
 
 function storeclient.new(opts)
   local R, sleep = opts.rpc, opts.sleep
-  local retries = opts.retries or 3
-  local timeout = opts.timeoutSecs or 15
+  -- short waits and several tries: a storage manager that just started (or just took over)
+  -- stays silent for a few seconds, and a quick retry beats one long wait
+  local retries = opts.retries or 4
+  local timeout = opts.timeoutSecs or 6
   local nextUp = 0
   local C = {}
 

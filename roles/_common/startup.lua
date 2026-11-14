@@ -22,6 +22,10 @@ if fs.exists("/bs/.installing") then
   return
 end
 
+-- A device handed to a player is locked: Ctrl+T is ignored and a crash never ends at a prompt.
+local locked = fs.exists("/bs/.locked")
+if locked then os.pullEvent = os.pullEventRaw end
+
 local fn, loadErr = loadfile(MAIN, nil, _ENV)
 if not fn then
   printError("Cannot start " .. MAIN .. ": " .. tostring(loadErr))
@@ -30,7 +34,11 @@ if not fn then
 end
 
 local ok, err = pcall(fn)
-if ok then return end
+if ok then
+  -- a locked program should never end; if it does (unless it just unlocked itself), start it again
+  if locked and fs.exists("/bs/.locked") then os.reboot() end
+  return
+end
 
 -- crashed: log it (keeping the log small), then reboot unless it keeps happening
 local now = os.epoch("utc")
@@ -46,6 +54,13 @@ pcall(writeAll, CRASHES, count .. " " .. first)
 
 printError("Program crashed: " .. tostring(err):sub(1, 200))
 if count > 5 then
+  if locked then
+    -- stay here instead of giving a prompt; the owner can still unlock or re-install it
+    -- (it keeps retrying once a minute, so a passing problem heals and the owner can still unlock it)
+    printError("This device has a fault. Please return it to the owner.")
+    sleep(60)
+    os.reboot()
+  end
   printError("Crashed " .. count .. " times in a row. Stopped. See " .. CRASH_LOG)
   return
 end

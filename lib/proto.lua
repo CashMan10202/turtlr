@@ -5,7 +5,7 @@ local S = require("lib.schema")
 local proto = {}
 
 proto.VERSION = 1
-proto.CH = { IN = 4201, OUT = 4202, BUS = 4210, TEL = 4211 }
+proto.CH = { IN = 4201, OUT = 4202, ENROLL = 4203, BUS = 4210, TEL = 4211 }
 
 proto.LIMITS = {
   frameDefault = 2048,      -- bytes, normal max frame
@@ -123,8 +123,9 @@ local mats = S.array(itemCount, 64)
 local dim = S.int(1, 64)
 
 proto.responses = {
+  -- unlock = true tells a locked device its owner has released it (it then drops to a normal prompt)
   ["hello"] = S.map({ server = S.str(16), minClient = S.str(16), time = S.int(0, 2 ^ 53),
-    state = S.enum({ "ok", "maintenance" }) }),
+    state = S.enum({ "ok", "maintenance" }) }, { unlock = S.bool() }),
   ["shape.preview"] = S.map({ w = dim, h = dim, d = dim, count = count, mats = mats }),
   ["job.quote"] = S.map({ quote = S.tok(24), count = count, mats = mats, raw = mats, hand = count,
     eta = S.int(0, 10000000), queue = S.int(0, 10000), turtles = S.int(1, 8), expires = S.int(0, 2 ^ 53) }),

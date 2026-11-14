@@ -111,6 +111,7 @@ Response body:
 | `server` | yes | text, max 16 |
 | `state` | yes | one of: `ok`, `maintenance` |
 | `time` | yes | integer 0..9007199254740992 |
+| `unlock` | no | true/false |
 
 ### `import.link`
 

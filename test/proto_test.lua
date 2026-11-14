@@ -17,7 +17,7 @@ end
 
 function T.constants()
   t.eq(proto.VERSION, 1)
-  t.eq(proto.CH, { IN = 4201, OUT = 4202, BUS = 4210, TEL = 4211 })
+  t.eq(proto.CH, { IN = 4201, OUT = 4202, ENROLL = 4203, BUS = 4210, TEL = 4211 })
   t.eq(proto.LIMITS.frameDefault, 2048)
   t.eq(proto.LIMITS.frameMax, 8192)
   t.eq(proto.LIMITS.jobsActive, 3)
