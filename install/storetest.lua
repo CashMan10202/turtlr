@@ -54,12 +54,14 @@ local function tests()
   step("put small", function() return store.put("config", "selftest-small", small) end)
   step("get small", function()
     local v, e = store.get("config", "selftest-small")
-    return v == small, e
+    if v == small then return true end
+    return false, e or "data differs!"
   end)
   step("put 100 KB", function() return store.put("config", "selftest-big", big) end)
   step("get 100 KB", function()
     local v, e = store.get("config", "selftest-big")
-    return v == big, e or (v and "data differs!" or nil)
+    if v == big then return true end
+    return false, e or "data differs!"
   end)
   step("list", function()
     local keysFound, e = store.list("config", "selftest-")
