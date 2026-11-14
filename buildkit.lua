@@ -884,19 +884,34 @@ core.checks = {
     if not (reader and writer) then return "FAIL", "no usable read/write methods" end
     local current = dev[reader]()
     if type(current) == "table" and next(current) ~= nil then return "SKIP", "device is not empty; not touching it" end
-    local function try(n)
-      local payload = ("x"):rep(n)
-      local arg = writer == "writeJson" and ('{"d":"' .. payload .. '"}') or { d = payload }
+    -- IMPORTANT: one NBT string over 65535 bytes crashes the server (Advanced Peripherals bug),
+    -- so the test data is written as many pieces of at most 60000 characters.
+    local PIECE, MOST = 60000, 1100000
+    local full = 0 -- number of full pieces known to fit
+    local function try(extra)
+      local tbl, json = {}, {}
+      for i = 1, full do tbl["d" .. i] = ("x"):rep(PIECE) end
+      if extra > 0 then tbl["d" .. (full + 1)] = ("x"):rep(extra) end
+      local arg = tbl
+      if writer == "writeJson" then
+        for k, v in pairs(tbl) do json[#json + 1] = '"' .. k .. '":"' .. v .. '"' end
+        arg = "{" .. table.concat(json, ",") .. "}"
+      end
       local ok, res = pcall(dev[writer], arg)
       if not ok or res == false then return false end
       -- do not trust the return value: read it back and see whether it really was stored
       local back = dev[reader]()
-      return type(back) == "table" and type(back.d) == "string" and #back.d == n
+      if type(back) ~= "table" then return false end
+      for k, v in pairs(tbl) do
+        if type(back[k]) ~= "string" or #back[k] ~= #v then return false end
+      end
+      return true
     end
     if not try(16) then return "FAIL", writer .. " refused even 16 characters" end
-    local lo, hi = 16, 1100000 -- lo is known good, hi is the most we will try
-    if try(hi) then
-      lo = hi
+    while (full + 1) * PIECE <= MOST and try(PIECE) do full = full + 1 end
+    local lo, hi = 0, PIECE -- how much of one more piece fits: lo fits, hi does not
+    if (full + 1) * PIECE > MOST then
+      hi = 0
     else
       while hi - lo > 1 do
         local mid = math.floor((lo + hi) / 2)
@@ -904,7 +919,8 @@ core.checks = {
       end
     end
     pcall(dev[writer], writer == "writeJson" and "{}" or {})
-    return "PASS", "largest payload accepted: " .. lo .. " characters (via " .. reader .. "/" .. writer .. ")"
+    return "PASS", ("about %d characters total, in pieces of up to %d (via %s/%s)")
+      :format(full * PIECE + lo, PIECE, reader, writer)
   end },
 
   { id = "geo.api", desc = "Geo Scanner (--scan to time a radius-16 scan)", run = function(env)
@@ -1411,7 +1427,7 @@ local specs = {}
 specs.storage = common({
   id = S.int(1, 16, 1),
   replicas = S.int(1, 4, 2),
-  shardBytes = S.int(16384, 900000, 200000),
+  shardBytes = S.int(1024, 900000, 40000), -- values above 45000 are treated as 45000
   deviceMaxBytes = S.int(65536, 16000000, 1000000),
   scrubMinutes = S.int(1, 1440, 30),
 })
@@ -2307,13 +2323,13 @@ end
 return storeclient
 ]=]
 F["manifest.lua"] = [=[
-return { version = "0.2.1", roles = {
+return { version = "0.2.2", roles = {
   ["compute"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2329,7 +2345,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2359,7 +2375,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2375,7 +2391,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2405,7 +2421,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2421,7 +2437,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2451,7 +2467,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2467,7 +2483,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2497,7 +2513,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2513,7 +2529,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2543,7 +2559,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2559,7 +2575,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2589,7 +2605,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2605,7 +2621,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2635,7 +2651,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2651,7 +2667,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2681,7 +2697,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2697,7 +2713,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2720,9 +2736,9 @@ return { version = "0.2.1", roles = {
     { path = "vendor/ccryptolib/util.lua", dest = "/bs/ccryptolib/util.lua", size = 1312, sha256 = "cdce1c0e75a4e56097853e4aa85fb76366866078e4694db00ebc958785c96caf" },
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
-    { path = "roles/storage/config.lua", dest = "/bs/role/config.lua", size = 859, sha256 = "894a9280af38baec8039758de0a7f2067882ccde30ea315c6dcfea35b4588161" },
-    { path = "roles/storage/device.lua", dest = "/bs/roles/storage/device.lua", size = 2854, sha256 = "712441bd0e2127f1edbfce38db90ef11d48397821cd8a0a37f3c5dc11a783a14" },
-    { path = "roles/storage/engine.lua", dest = "/bs/roles/storage/engine.lua", size = 26300, sha256 = "4be24df96650f57409627bd6bfc3988b437fdc72c6dedf7855122a952ded02ab" },
+    { path = "roles/storage/config.lua", dest = "/bs/role/config.lua", size = 935, sha256 = "bab754bf5e3aa317b13944f200bad4afdd505464b8f961a90026730fa5d9fa0d" },
+    { path = "roles/storage/device.lua", dest = "/bs/roles/storage/device.lua", size = 3305, sha256 = "65148aa98ef1926a7475a7e0fe9073fc42038677854a3a4c064b7abae8bd99eb" },
+    { path = "roles/storage/engine.lua", dest = "/bs/roles/storage/engine.lua", size = 26548, sha256 = "fca5a92737f30e75696ac888fb5fb3557de777b4d785d7e4c1aff5b13549b788" },
     { path = "roles/storage/main.lua", dest = "/bs/role/main.lua", size = 3187, sha256 = "37471e9f68f5bc0365e77b5d280c063419e21dfd4805da152f70ef7ccd00c9a3" },
     { path = "roles/storage/server.lua", dest = "/bs/roles/storage/server.lua", size = 7509, sha256 = "42d7079f4d5160ce38ea0e8012f343b4ab18b6c49655914c23516b1de5391813" },
   },
@@ -2731,7 +2747,7 @@ return { version = "0.2.1", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2860, sha256 = "ff3480ebcd820fb884f5d8649a38d3fc53554aea5567ffedfdc586a97ab401a5" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
     { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
     { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
@@ -2747,7 +2763,7 @@ return { version = "0.2.1", roles = {
     { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3425, sha256 = "bd0ac8e84462f6233bfa776cf68e526f480837d7185a832e7af62c3578730a3b" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 1687, sha256 = "003a8210ca31d4a5c0568e5ac66149a437398e294128bbc801720ca199fb77af" },
-    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 9770, sha256 = "5d60914517ff4bc410e6d88402949cc1edcff6338c555c8afbe81884f9fe01e2" },
+    { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10523, sha256 = "ad492110eb3ee906763bd0354bb72d53d78c1c1ed9442581ee238f7af91abef7" },
     { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
@@ -2969,8 +2985,9 @@ return {
   id = 1,
   -- How many NBT Storage blocks each piece of data is copied to.
   replicas = 2,
-  -- Size of one piece of data. Must stay well under the NBT Storage limit.
-  shardBytes = 200000,
+  -- Size of one piece of data. Minecraft cannot store a single text over 65535 bytes in a block,
+  -- so anything above 45000 here is treated as 45000.
+  shardBytes = 40000,
   -- Size limit of one NBT Storage block (nbtStorageMaxSize in the Advanced Peripherals config, minus headroom).
   deviceMaxBytes = 1000000,
   -- How often (minutes) to re-check stored data for damage.
@@ -2991,6 +3008,10 @@ local TYPES = { nbtStorage = true, nbt_storage = true }
 -- Method names differ between Advanced Peripherals versions. Seen in-game on 1.21.1: load / save.
 local READERS = { "load", "read" }
 local WRITERS = { "save", "writeTable", "writeJson" }
+
+-- Minecraft cannot store one NBT string longer than 65535 bytes, and Advanced Peripherals crashes
+-- the whole server when asked to (instead of returning an error). Never send anything close to it.
+device.MAX_STRING = 65000
 
 local function toJson(cells)
   local parts = {}
@@ -3036,6 +3057,12 @@ function device.wrap(name, periph, methodNames)
 
   -- Replaces the whole content of the block. Returns true, or nil plus an error.
   function D.store(cells)
+    for k, v in pairs(cells) do
+      if #k > device.MAX_STRING or #v > device.MAX_STRING then
+        D.errors = D.errors + 1
+        return nil, "entry too long for NBT (" .. math.max(#k, #v) .. " bytes)"
+      end
+    end
     local arg = writer == "writeJson" and toJson(cells) or cells
     local ok, res, err = pcall(periph[writer], arg)
     -- success is "did not throw, did not return false, did not return nil plus a message"
@@ -3083,6 +3110,9 @@ local engine = {}
 local NAMESPACES = { players = true, jobs = true, schematics = true, recipes = true, library = true,
   surveys = true, logs = true, config = true }
 local MAX_VALUE = 4194304
+-- One shard becomes one NBT string (base64, so 4/3 larger, plus a short header). Minecraft's limit
+-- for a single NBT string is 65535 bytes, so a shard may hold at most 45000 raw bytes (60000 encoded).
+local MAX_SHARD = 45000
 
 -- Cell text: "<ns/key>|<ver>|<i>|<n>|<size>|<hash>|<flag>\n<base64 data>"
 local function makeCell(k, ver, i, n, size, hash, flag, data)
@@ -3102,7 +3132,7 @@ end
 function engine.new(opts)
   local crypto = opts.crypto
   local replicas = opts.replicas or 2
-  local shardBytes = opts.shardBytes or 200000
+  local shardBytes = math.min(opts.shardBytes or 40000, MAX_SHARD)
   local deviceMax = opts.deviceMaxBytes or 1000000
   local yield = opts.yield or function() end
 

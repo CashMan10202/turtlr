@@ -116,19 +116,34 @@ core.checks = {
     if not (reader and writer) then return "FAIL", "no usable read/write methods" end
     local current = dev[reader]()
     if type(current) == "table" and next(current) ~= nil then return "SKIP", "device is not empty; not touching it" end
-    local function try(n)
-      local payload = ("x"):rep(n)
-      local arg = writer == "writeJson" and ('{"d":"' .. payload .. '"}') or { d = payload }
+    -- IMPORTANT: one NBT string over 65535 bytes crashes the server (Advanced Peripherals bug),
+    -- so the test data is written as many pieces of at most 60000 characters.
+    local PIECE, MOST = 60000, 1100000
+    local full = 0 -- number of full pieces known to fit
+    local function try(extra)
+      local tbl, json = {}, {}
+      for i = 1, full do tbl["d" .. i] = ("x"):rep(PIECE) end
+      if extra > 0 then tbl["d" .. (full + 1)] = ("x"):rep(extra) end
+      local arg = tbl
+      if writer == "writeJson" then
+        for k, v in pairs(tbl) do json[#json + 1] = '"' .. k .. '":"' .. v .. '"' end
+        arg = "{" .. table.concat(json, ",") .. "}"
+      end
       local ok, res = pcall(dev[writer], arg)
       if not ok or res == false then return false end
       -- do not trust the return value: read it back and see whether it really was stored
       local back = dev[reader]()
-      return type(back) == "table" and type(back.d) == "string" and #back.d == n
+      if type(back) ~= "table" then return false end
+      for k, v in pairs(tbl) do
+        if type(back[k]) ~= "string" or #back[k] ~= #v then return false end
+      end
+      return true
     end
     if not try(16) then return "FAIL", writer .. " refused even 16 characters" end
-    local lo, hi = 16, 1100000 -- lo is known good, hi is the most we will try
-    if try(hi) then
-      lo = hi
+    while (full + 1) * PIECE <= MOST and try(PIECE) do full = full + 1 end
+    local lo, hi = 0, PIECE -- how much of one more piece fits: lo fits, hi does not
+    if (full + 1) * PIECE > MOST then
+      hi = 0
     else
       while hi - lo > 1 do
         local mid = math.floor((lo + hi) / 2)
@@ -136,7 +151,8 @@ core.checks = {
       end
     end
     pcall(dev[writer], writer == "writeJson" and "{}" or {})
-    return "PASS", "largest payload accepted: " .. lo .. " characters (via " .. reader .. "/" .. writer .. ")"
+    return "PASS", ("about %d characters total, in pieces of up to %d (via %s/%s)")
+      :format(full * PIECE + lo, PIECE, reader, writer)
   end },
 
   { id = "geo.api", desc = "Geo Scanner (--scan to time a radius-16 scan)", run = function(env)

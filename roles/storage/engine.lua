@@ -17,6 +17,9 @@ local engine = {}
 local NAMESPACES = { players = true, jobs = true, schematics = true, recipes = true, library = true,
   surveys = true, logs = true, config = true }
 local MAX_VALUE = 4194304
+-- One shard becomes one NBT string (base64, so 4/3 larger, plus a short header). Minecraft's limit
+-- for a single NBT string is 65535 bytes, so a shard may hold at most 45000 raw bytes (60000 encoded).
+local MAX_SHARD = 45000
 
 -- Cell text: "<ns/key>|<ver>|<i>|<n>|<size>|<hash>|<flag>\n<base64 data>"
 local function makeCell(k, ver, i, n, size, hash, flag, data)
@@ -36,7 +39,7 @@ end
 function engine.new(opts)
   local crypto = opts.crypto
   local replicas = opts.replicas or 2
-  local shardBytes = opts.shardBytes or 200000
+  local shardBytes = math.min(opts.shardBytes or 40000, MAX_SHARD)
   local deviceMax = opts.deviceMaxBytes or 1000000
   local yield = opts.yield or function() end
 

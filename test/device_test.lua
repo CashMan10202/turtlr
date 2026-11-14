@@ -36,6 +36,17 @@ function T.real_advanced_peripherals_names_load_and_save()
   end
 end
 
+function T.oversized_strings_never_reach_the_peripheral()
+  local p, ctl = fake_nbt.new({ style = "save", reader = "load", limit = 10000000 })
+  local d = device.wrap("n", p, { "load", "save" })
+  t.ok(d.store({ ok = ("x"):rep(65000) }))
+  local ok, err = d.store({ ok = "small", big = ("x"):rep(65001) })
+  t.eq(ok, nil)
+  t.ok(err:find("too long", 1, true), err)
+  t.eq(ctl.crashed, nil)
+  t.eq(#d.load().ok, 65000) -- previous content untouched
+end
+
 function T.wrap_needs_read_and_a_writer()
   t.eq(device.wrap("x", { read = function() end }, { "read" }), nil)
   t.eq(device.wrap("x", { writeTable = function() end }, { "writeTable" }), nil)

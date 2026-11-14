@@ -91,8 +91,21 @@ function T.real_nbt_method_names_pass_and_can_be_measured()
   t.eq(r["nbt.api"].status, "PASS")
   t.ok(r["nbt.api"].detail:find("load + save", 1, true), r["nbt.api"].detail)
   t.eq(r["nbt.size"].status, "PASS")
-  -- the fake counts key + value characters: "d" + 4999
-  t.ok(r["nbt.size"].detail:find("4999", 1, true), r["nbt.size"].detail)
+  -- the fake counts key + value characters: "d1" + 4998
+  t.ok(r["nbt.size"].detail:find("about 4998 ", 1, true), r["nbt.size"].detail)
+  t.eq(p.load(), {})
+end
+
+function T.nbt_size_probe_never_writes_a_string_that_would_crash_the_server()
+  local fake_nbt = require("test.fake_nbt")
+  local e, ev = env({ nbtWrite = true })
+  local p, ctl = fake_nbt.new({ style = "save", reader = "load", quiet = true, limit = 1048576 })
+  e.attach("nbt_storage_0", "nbt_storage", p)
+  local r = byId(core.runAll(ev))
+  t.eq(ctl.crashed, nil)
+  t.eq(r["nbt.size"].status, "PASS")
+  local total = tonumber(r["nbt.size"].detail:match("about (%d+) characters"))
+  t.ok(total and total > 1000000 and total <= 1048576, r["nbt.size"].detail)
   t.eq(p.load(), {})
 end
 
@@ -102,7 +115,9 @@ function T.nbt_size_probe_handles_devices_that_throw()
   e.attach("nbt_0", "nbtStorage", {
     read = function() return stored end,
     writeTable = function(tbl)
-      if #tbl.d > 5000 then error("NBT too big") end
+      local n = 0
+      for _, v in pairs(tbl) do n = n + #v end
+      if n > 5000 then error("NBT too big") end
       stored = tbl
       return true
     end,

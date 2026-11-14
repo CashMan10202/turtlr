@@ -62,6 +62,15 @@ function fake_nbt.new(opts)
       power.writesLeft = power.writesLeft - 1
     end
     if type(tbl) ~= "table" then return nil, "not a table" end
+    -- Real behaviour (crash report 2026-11-13): Minecraft cannot write one NBT string over
+    -- 65535 bytes, and Advanced Peripherals turns that into a SERVER CRASH, not an error.
+    for k, v in pairs(tbl) do
+      if #tostring(k) > 65535 or (type(v) == "string" and #v > 65535) then
+        ctl.crashed = true
+        if power then power.crashed = true end
+        error("SERVER CRASH: NBT string longer than 65535 bytes")
+      end
+    end
     if size(tbl) > limit then return nil, "NBT data is too large" end
     stored = copy(tbl)
     ctl.writes = ctl.writes + 1

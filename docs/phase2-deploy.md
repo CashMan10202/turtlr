@@ -82,6 +82,6 @@ farm, reachable only over the encrypted internal network.
 |---|---|---|
 | `id` | 1 | Manager number; lowest running id is primary |
 | `replicas` | 2 | Copies of every piece of data, each on a different NBT Storage block |
-| `shardBytes` | 200000 | Size of one piece |
+| `shardBytes` | 40000 | Size of one piece. Capped at 45000: Minecraft cannot store one text over 65535 bytes in a block |
 | `deviceMaxBytes` | 1000000 | How much to put in one NBT Storage block; keep at or under `nbtStorageMaxSize` |
 | `scrubMinutes` | 30 | Time for one full health check of the farm |

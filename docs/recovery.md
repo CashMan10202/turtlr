@@ -56,3 +56,11 @@ block by hand loses its contents; test with one first), cable them up again, sta
   is checksummed, not encrypted).
 - If two managers both act as primary for a few seconds (for example right as one starts), a write
   made in that moment can be lost; the scrub repairs copies but cannot recover an overwritten value.
+
+## Known mod limit: 65535 bytes per text
+
+Minecraft cannot save a single piece of text longer than 65535 bytes inside a block, and Advanced
+Peripherals (seen on 0.8.2a) crashes the whole game when an NBT Storage is asked to hold one.
+BuildKit 0.2.2 and later never write a piece larger than 60000 characters, and the storage adapter
+refuses anything over 65000 before it reaches the block. If you write your own programs against
+NBT Storage, keep every string under that size.

@@ -28,7 +28,7 @@ local specs = {}
 specs.storage = common({
   id = S.int(1, 16, 1),
   replicas = S.int(1, 4, 2),
-  shardBytes = S.int(16384, 900000, 200000),
+  shardBytes = S.int(1024, 900000, 40000), -- values above 45000 are treated as 45000
   deviceMaxBytes = S.int(65536, 16000000, 1000000),
   scrubMinutes = S.int(1, 1440, 30),
 })

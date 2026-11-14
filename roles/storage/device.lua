@@ -8,6 +8,10 @@ local TYPES = { nbtStorage = true, nbt_storage = true }
 local READERS = { "load", "read" }
 local WRITERS = { "save", "writeTable", "writeJson" }
 
+-- Minecraft cannot store one NBT string longer than 65535 bytes, and Advanced Peripherals crashes
+-- the whole server when asked to (instead of returning an error). Never send anything close to it.
+device.MAX_STRING = 65000
+
 local function toJson(cells)
   local parts = {}
   for k, v in pairs(cells) do
@@ -52,6 +56,12 @@ function device.wrap(name, periph, methodNames)
 
   -- Replaces the whole content of the block. Returns true, or nil plus an error.
   function D.store(cells)
+    for k, v in pairs(cells) do
+      if #k > device.MAX_STRING or #v > device.MAX_STRING then
+        D.errors = D.errors + 1
+        return nil, "entry too long for NBT (" .. math.max(#k, #v) .. " bytes)"
+      end
+    end
     local arg = writer == "writeJson" and toJson(cells) or cells
     local ok, res, err = pcall(periph[writer], arg)
     -- success is "did not throw, did not return false, did not return nil plus a message"

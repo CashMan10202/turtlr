@@ -259,6 +259,20 @@ function T.rebuild_cleans_leftovers()
   t.eq(n, 1)
 end
 
+function T.large_values_never_produce_a_string_minecraft_cannot_store()
+  -- even if the config asks for huge shards (as the first release did), cells stay under 65535 bytes
+  local rack = H.rack(3, 2000000)
+  local E = H.boot(rack, { shardBytes = 200000, deviceMaxBytes = 1000000 })
+  local big = H.blob(300000)
+  t.ok(E.put("schematics", "big", big))
+  t.eq(rack.power.crashed, nil)
+  for _, ctl in ipairs(rack.ctl) do
+    for _, cell in pairs(ctl.dump()) do t.ok(#cell <= 65000, "cell of " .. #cell .. " bytes") end
+  end
+  t.eq(E.get("schematics", "big"), big)
+  t.ok(E.stat("schematics", "big").shards >= 7)
+end
+
 function T.yield_is_called_between_device_operations()
   local rack = H.rack(3)
   local engine = require("roles.storage.engine")
