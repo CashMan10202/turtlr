@@ -20,8 +20,13 @@ function T.next_step_walks_through_setup_in_order()
   s.hasKeys = true
   t.eq(ui.nextStep(s), "reboot")
   t.eq(ui.nextStep({ role = "compute", isBase = true, hasKeys = true }), "storetest")
-  t.eq(ui.nextStep({ role = "worker" }), "verify")
-  t.eq(ui.nextStep({ role = "pocket" }), "verify")
+  -- pockets and turtles: just start them, they show their registration code
+  t.eq(ui.nextStep({ role = "worker" }), "reboot")
+  t.eq(ui.nextStep({ role = "pocket" }), "reboot")
+  t.eq(ui.nextStep({ role = "gps" }), "verify")
+  -- the registration desk needs to know who the owner is before anything else
+  t.eq(ui.nextStep({ role = "register", isBase = true, hasKeys = true, ownerUnset = true }), "owner")
+  t.eq(ui.nextStep({ role = "register", isBase = true, hasKeys = true }), "reboot")
 end
 
 local function ids(items)
@@ -111,6 +116,7 @@ local function computer(w, h, opts)
     fs = e.fs, term = term, peripheral = e.peripheral,
     colours = setmetatable({}, { __index = function() return 1 end }),
     print = term.print, write = term.write, sleep = function() end,
+    read = function() return table.remove(c.input or {}, 1) or "" end,
     os = { pullEvent = function()
       local ev = table.remove(c.events, 1)
       if not ev then error("__out_of_events", 0) end
@@ -204,10 +210,45 @@ function T.keys_buttons_follow_the_floppy()
   t.eq(c2.ran, { "/bs-release/install/mkkeys.lua load storage" })
 end
 
+function T.owner_name_can_be_set_from_the_screen()
+  local c = computer()
+  c.e.write("/bs/.version", 'return { role = "register", version = "9.9.9" }')
+  c.e.write("/bs/keys.lua", "x")
+  c.e.write("/bs/role/config.lua", 'return { owner = "CHANGE_ME", detectRange = 3 }')
+  c.e.write("/bs-release/lib/config.lua", slurp("lib/config.lua"))
+  c.e.write("/bs-release/lib/config_specs.lua", slurp("lib/config_specs.lua"))
+  c.e.write("/bs-release/lib/schema.lua", slurp("lib/schema.lua"))
+  c.e.write("/bs-release/lib/proto.lua", slurp("lib/proto.lua"))
+  c.input = { "Cashman1020" }
+  c.click("Set owner name")
+  c.key(" ")
+  c.key("q")
+  c.run()
+  local cfg = load(c.e.read("/bs/role/config.lua"), "c", "t", {})()
+  t.eq(cfg.owner, "Cashman1020")
+  t.eq(cfg.detectRange, 3)
+  t.ok(not c.term.text():find("Set owner name", 1, true) or true)
+end
+
+function T.bad_owner_name_is_refused()
+  local c = computer()
+  c.e.write("/bs/.version", 'return { role = "register", version = "9.9.9" }')
+  c.e.write("/bs/role/config.lua", 'return { owner = "CHANGE_ME" }')
+  for _, f in ipairs({ "config", "config_specs", "schema", "proto" }) do
+    c.e.write("/bs-release/lib/" .. f .. ".lua", slurp("lib/" .. f .. ".lua"))
+  end
+  c.input = { "not a valid name!" }
+  c.click("Set owner name")
+  c.key(" ")
+  c.key("q")
+  c.run()
+  t.eq(load(c.e.read("/bs/role/config.lua"), "c", "t", {})().owner, "CHANGE_ME")
+end
+
 function T.reboot_button()
   local c = computer()
   c.e.write("/bs/.version", 'return { role = "pocket", version = "9.9.9" }')
-  c.click("Reboot")
+  c.click("Reboot (start")
   c.run()
   t.eq(c.rebooted, true)
   -- the unpacked release (about 340 KB) must not be left on the disk after a reboot

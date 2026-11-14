@@ -36,6 +36,8 @@ function T.top_level_docs_exist()
   local p2 = read("docs/phase2-deploy.md")
   t.ok(p2 and p2:find("mkkeys", 1, true) and p2:find("storetest", 1, true))
   t.ok(read("docs/recovery.md"))
+  local p3 = read("docs/phase3-deploy.md")
+  t.ok(p3 and p3:find("Check number", 1, true) and p3:find("Set owner name", 1, true))
 end
 
 return T

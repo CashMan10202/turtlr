@@ -113,15 +113,16 @@ local F = {}
 BUNDLE_TAIL = """
 local DIR = "/bs-release"
 if fs.exists(DIR) then fs.delete(DIR) end
+-- This file is already loaded in memory, so delete it from the disk FIRST: the computer does not
+-- have room for the bundle and its unpacked copy at the same time.
+local me = shell.getRunningProgram()
+if me and fs.exists(me) then fs.delete(me) end
 for path, text in pairs(F) do
   local h = fs.open(DIR .. "/" .. path, "w")
   h.write(text)
   h.close()
 end
 F = nil
--- remove this bundle file now: the computer needs the disk space for the install
-local me = shell.getRunningProgram()
-if me and fs.exists(me) then fs.delete(me) end
 local ok
 if args[1] == "unpack" then
   print("Unpacked to " .. DIR)

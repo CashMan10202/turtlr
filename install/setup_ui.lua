@@ -11,8 +11,9 @@ function ui.nextStep(s)
     if s.floppy then return "mkkeys" end
     return "needfloppy"
   end
+  if s.role == "register" and s.ownerUnset then return "owner" end
   if s.role == "compute" then return "storetest" end
-  if s.isBase then return "reboot" end
+  if s.isBase or s.role == "pocket" or s.role == "worker" then return "reboot" end
   return "verify"
 end
 
@@ -25,6 +26,7 @@ ui.HINTS = {
   storetest = "Test the storage system.",
   reboot = "Reboot to start the program.",
   verify = "Check the mods work here.",
+  owner = "Tell me your Minecraft name.",
 }
 
 -- Buttons for the main menu: the recommended one first (flagged), then the rest.
@@ -37,6 +39,7 @@ function ui.menu(s)
   add("install", s.role and "Change role" or "Install a role", s.release)
   add("loadkeys", "Load keys (" .. tostring(s.role) .. ")", s.isBase and s.floppyKeys)
   add("mkkeys", "Make new keys", s.isBase and s.floppy)
+  add("owner", "Set owner name", s.role == "register")
   add("verify", "Check this computer", true)
   add("storetest", "Test storage", s.role == "compute" and s.hasKeys)
   add("reboot", "Reboot (start program)", s.role ~= nil)

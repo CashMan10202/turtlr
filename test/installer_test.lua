@@ -135,6 +135,32 @@ function T.stale_staging_is_cleared()
   t.ok(not e.fs.exists("/bs/lib/junk.lua"))
 end
 
+function T.upgrade_skips_files_that_did_not_change()
+  -- most of a release (the crypto library, for one) never changes; re-copying it wastes scarce disk space
+  local e, fetch = setup()
+  t.ok(core.install(e.fs, fetch, manifest(), "compute"))
+  local fetched = {}
+  local counting = function(path) fetched[#fetched + 1] = path; return fetch(path) end
+  src["roles/compute/main.lua"] = "print('compute v2')"
+  e.write("/disk/buildservice/roles/compute/main.lua", src["roles/compute/main.lua"])
+  -- so little free space that a full re-copy could not fit
+  e.capacity = e.capacity - e.fs.getFreeSpace() + 1024 + #src["roles/compute/main.lua"] + 10
+  local ok, err = core.install(e.fs, counting, manifest(), "compute")
+  src["roles/compute/main.lua"] = "print('compute')"
+  t.ok(ok, tostring(err))
+  t.eq(fetched, { "roles/compute/main.lua" })
+  t.eq(e.read("/bs/role/main.lua"), "print('compute v2')")
+  t.eq(e.read("/bs/lib/codec.lua"), src["lib/codec.lua"])
+end
+
+function T.a_damaged_installed_file_is_replaced()
+  local e, fetch = setup()
+  t.ok(core.install(e.fs, fetch, manifest(), "compute"))
+  e.write("/bs/lib/codec.lua", "return 'codec vX'") -- same size, different content
+  t.ok(core.install(e.fs, fetch, manifest(), "compute"))
+  t.eq(e.read("/bs/lib/codec.lua"), src["lib/codec.lua"])
+end
+
 function T.setup_shortcut_destination_is_allowed()
   local e, fetch = setup()
   local m = manifest()

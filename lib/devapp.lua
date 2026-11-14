@@ -34,7 +34,6 @@ function devapp.enrol(env)
           id.id, id.kind, id.player = grant.id, env.kind, grant.player
           id.inPk, id.outPk = grant.inPk, grant.outPk
           identity.save(env.fs, ID_PATH, id)
-          lock.engage(env.fs, env.settings)
           modem.close(proto.CH.ENROLL)
           return id, enroll.checkNumber(crypto, grant, grant.regPk, id.signPk)
         end
@@ -56,6 +55,9 @@ function devapp.run(env)
     local res, err = C.request("hello", { client = devapp.VERSION, caps = env.caps or 0 })
     if res then
       status = ("connected (%d ms)"):format(env.clock() - started)
+      -- lock only once the base has really answered: a device that cannot reach the base must
+      -- stay open, because unlocking also goes through the base
+      if not res.unlock and not lock.isLocked(env.fs) then lock.engage(env.fs, env.settings) end
       if res.unlock then
         lock.release(env.fs, env.settings)
         env.show({ "Unlocked by the owner.", "This device is open again." })

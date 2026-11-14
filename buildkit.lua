@@ -155,6 +155,25 @@ function core.install(fs, fetch, manifest, role, opts)
   local yield = opts and opts.yield or function() end
 
   if fs.exists(STAGING) then fs.delete(STAGING) end
+
+  -- Skip files that are already installed and identical (saves disk space and time on upgrades).
+  local function unchanged(e)
+    if isRoleConfig(e.dest) or not fs.exists(e.dest) or fs.isDir(e.dest) or fs.getSize(e.dest) ~= e.size then
+      return false
+    end
+    local h = fs.open(e.dest, "rb")
+    if not h then return false end
+    local data = h.readAll()
+    h.close()
+    return sha256.hex(data) == e.sha256:lower()
+  end
+  local todo = {}
+  for _, e in ipairs(entries) do
+    if not unchanged(e) then todo[#todo + 1] = e end
+    yield()
+  end
+  entries = todo
+
   local need = 0
   for _, e in ipairs(entries) do need = need + e.size end
   if fs.getFreeSpace("/") < need + 1024 then
@@ -356,10 +375,22 @@ local function isBaseRole(role)
   return false
 end
 
+-- the registration desk only works for the owner; has their name been filled in yet?
+local function ownerUnset()
+  local h = fs.open("/bs/role/config.lua", "r")
+  if not h then return true end
+  local src = h.readAll()
+  h.close()
+  local fn = load(src, "=config", "t", {})
+  local ok, cfg = pcall(fn or error)
+  return not ok or type(cfg) ~= "table" or cfg.owner == nil or cfg.owner == "CHANGE_ME"
+end
+
 local function getState()
   local inst = core.installed(fs)
   local role = inst and inst.role
   return {
+    ownerUnset = role == "register" and ownerUnset(),
     release = findRelease() ~= nil,
     role = role, version = inst and inst.version,
     isBase = role ~= nil and isBaseRole(role),
@@ -534,6 +565,30 @@ local function doVerify()
   if picked.flag then run("verify", picked.flag) else run("verify") end
 end
 
+local function doOwner()
+  local config = require("lib.config")
+  local specs = require("lib.config_specs")
+  local cfg, err = config.load(fs, "/bs/role/config.lua", specs.register)
+  if not cfg then return message({ "The config file has a problem:", tostring(err) }, colours.red) end
+  clear()
+  print("Your Minecraft name, exactly as it")
+  print("appears in chat (capitals matter).")
+  print("Only this player can register devices.")
+  print("")
+  write("Name: ")
+  local name = read()
+  if not name:find("^[A-Za-z0-9_]+$") or #name > 16 then
+    return message({ "That is not a valid Minecraft name.", "Nothing was changed." }, colours.red)
+  end
+  cfg.owner = name
+  local ok, saveErr = config.save(fs, "/bs/role/config.lua", cfg)
+  if ok then
+    message({ "Owner set to " .. name .. ".", "", "Reboot for it to take effect." }, colours.lime)
+  else
+    message({ "Could not save:", tostring(saveErr) }, colours.red)
+  end
+end
+
 local function doGetRelease()
   message({ "This computer has no release files.", "",
     "Drag buildkit.lua from your PC onto this screen, then type:", "", "  buildkit" }, colours.white)
@@ -547,6 +602,7 @@ while true do
   if picked.id == "install" then doInstall()
   elseif picked.id == "getrelease" then doGetRelease()
   elseif picked.id == "verify" then doVerify()
+  elseif picked.id == "owner" then doOwner()
   elseif picked.id == "mkkeys" then run("mkkeys")
   elseif picked.id == "loadkeys" then run("mkkeys", "load", state.role)
   elseif picked.id == "storetest" then run("storetest")
@@ -575,8 +631,9 @@ function ui.nextStep(s)
     if s.floppy then return "mkkeys" end
     return "needfloppy"
   end
+  if s.role == "register" and s.ownerUnset then return "owner" end
   if s.role == "compute" then return "storetest" end
-  if s.isBase then return "reboot" end
+  if s.isBase or s.role == "pocket" or s.role == "worker" then return "reboot" end
   return "verify"
 end
 
@@ -589,6 +646,7 @@ ui.HINTS = {
   storetest = "Test the storage system.",
   reboot = "Reboot to start the program.",
   verify = "Check the mods work here.",
+  owner = "Tell me your Minecraft name.",
 }
 
 -- Buttons for the main menu: the recommended one first (flagged), then the rest.
@@ -601,6 +659,7 @@ function ui.menu(s)
   add("install", s.role and "Change role" or "Install a role", s.release)
   add("loadkeys", "Load keys (" .. tostring(s.role) .. ")", s.isBase and s.floppyKeys)
   add("mkkeys", "Make new keys", s.isBase and s.floppy)
+  add("owner", "Set owner name", s.role == "register")
   add("verify", "Check this computer", true)
   add("storetest", "Test storage", s.role == "compute" and s.hasKeys)
   add("reboot", "Reboot (start program)", s.role ~= nil)
@@ -1475,7 +1534,13 @@ specs.compute = common({
   quoteMinutes = S.int(1, 1440, 15),
 })
 
+local side = function(default)
+  return S.enum({ "top", "bottom", "left", "right", "front", "back" }, default)
+end
+
 specs.incoming = common({
+  extSide = side("top"),  -- side with the ENDER modem (talks to players' devices)
+  busSide = side("back"), -- side with the normal wireless modem (talks to the base)
   frameMax = S.int(512, 8192, proto.LIMITS.frameMax),
   clockSkewSecs = S.int(5, 600, 120),
   rate = rate(5, 60),
@@ -1483,6 +1548,8 @@ specs.incoming = common({
 })
 
 specs.outgoing = common({
+  extSide = side("top"),
+  busSide = side("back"),
   frameMax = S.int(512, 8192, proto.LIMITS.frameMax),
   queueMax = S.int(8, 4096, 256),
 })
@@ -1535,6 +1602,8 @@ F["lib/crypto.lua"] = [=[
 local random = require("ccryptolib.random")
 local blake3 = require("ccryptolib.blake3")
 local aead = require("ccryptolib.aead")
+local ed25519 = require("ccryptolib.ed25519")
+local x25519 = require("ccryptolib.x25519")
 
 local crypto = {}
 
@@ -1593,7 +1662,415 @@ function crypto.open(key, counter, sealed, aad)
   return nil
 end
 
+-- Signatures (Ed25519): prove who wrote a message. Returns secretKey, publicKey.
+function crypto.signKeypair()
+  local sk = crypto.random(32)
+  return sk, ed25519.publicKey(sk)
+end
+
+function crypto.sign(sk, pk, msg) return ed25519.sign(sk, pk, msg) end
+
+-- Never throws: malformed keys or signatures simply do not verify.
+function crypto.verify(pk, msg, sig)
+  if type(pk) ~= "string" or #pk ~= 32 or type(sig) ~= "string" or #sig ~= 64 or type(msg) ~= "string" then
+    return false
+  end
+  local ok, good = pcall(ed25519.verify, pk, msg, sig)
+  return ok and good == true
+end
+
+-- Key agreement (X25519): two sides derive the same secret from their own secret key and the
+-- other's public key. Returns secretKey, publicKey.
+function crypto.kxKeypair()
+  local sk = crypto.random(32)
+  return sk, x25519.publicKey(sk)
+end
+
+function crypto.exchange(sk, pk) return x25519.exchange(sk, pk) end
+
 return crypto
+]=]
+F["lib/devapp.lua"] = [=[
+-- What a pocket or turtle runs in Phase 3: register at the owner's desk, then stay connected.
+-- (The real pocket app and turtle program replace the "connected" part in later phases.)
+local enroll = require("lib.enroll")
+local identity = require("lib.identity")
+local devclient = require("lib.devclient")
+local lock = require("lib.lock")
+local proto = require("lib.proto")
+
+local devapp = {}
+
+devapp.VERSION = "0.3.0"
+local ID_PATH = "/bs/device.lua"
+
+-- env: { fs, settings, crypto, modem, clock, pull, startTimer, show(lines), kind }
+-- show(lines) displays a list of text lines (the caller decides how).
+function devapp.enrol(env)
+  local crypto, modem = env.crypto, env.modem
+  local id = env.crypto and require("lib.extproto").newIdentity(crypto)
+  local nonce = crypto.random(8)
+  local code = enroll.code(crypto, id.signPk, id.kxPk, nonce)
+  modem.open(proto.CH.ENROLL)
+  env.show({ "Not registered yet.", "", "Take this to the owner's", "registration desk.", "",
+    "Code:  " .. code:sub(1, 3) .. " " .. code:sub(4) })
+  local frame = enroll.request(id, env.kind, nonce)
+  while true do
+    modem.transmit(proto.CH.ENROLL, proto.CH.ENROLL, frame)
+    local timer = env.startTimer(3)
+    while true do
+      local ev, a, channel, _, payload = env.pull()
+      if ev == "timer" and a == timer then break end
+      if ev == "modem_message" and channel == proto.CH.ENROLL then
+        local grant = enroll.openReply(crypto, id, nonce, payload)
+        if grant then
+          id.id, id.kind, id.player = grant.id, env.kind, grant.player
+          id.inPk, id.outPk = grant.inPk, grant.outPk
+          identity.save(env.fs, ID_PATH, id)
+          modem.close(proto.CH.ENROLL)
+          return id, enroll.checkNumber(crypto, grant, grant.regPk, id.signPk)
+        end
+      end
+    end
+  end
+end
+
+-- Runs forever (returns only when the owner unlocks the device).
+function devapp.run(env)
+  local id = identity.load(env.fs, ID_PATH)
+  local check
+  if not id then id, check = devapp.enrol(env) end
+  local C = devclient.new({ crypto = env.crypto, modem = env.modem, identity = id, clock = env.clock,
+    pull = env.pull, startTimer = env.startTimer })
+  local status = "connecting..."
+  while true do
+    local started = env.clock()
+    local res, err = C.request("hello", { client = devapp.VERSION, caps = env.caps or 0 })
+    if res then
+      status = ("connected (%d ms)"):format(env.clock() - started)
+      -- lock only once the base has really answered: a device that cannot reach the base must
+      -- stay open, because unlocking also goes through the base
+      if not res.unlock and not lock.isLocked(env.fs) then lock.engage(env.fs, env.settings) end
+      if res.unlock then
+        lock.release(env.fs, env.settings)
+        env.show({ "Unlocked by the owner.", "This device is open again." })
+        return "unlocked"
+      end
+    else
+      status = "no answer (" .. tostring(err) .. ")"
+    end
+    local lines = { "BuildKit " .. env.kind .. " #" .. id.id, "Owner: " .. id.player, "", "Server: " .. status }
+    if res then lines[#lines + 1] = "Server version " .. res.server end
+    if check then
+      lines[#lines + 1] = ""
+      lines[#lines + 1] = "Check number: " .. check
+      lines[#lines + 1] = "(must match the desk screen)"
+    end
+    env.show(lines)
+    local timer = env.startTimer(5)
+    repeat local ev, a = env.pull() until ev == "timer" and a == timer
+  end
+end
+
+return devapp
+]=]
+F["lib/devclient.lua"] = [=[
+-- Device-side connection to the base: send a request through INCOMING, wait for the reply from OUTGOING.
+--   local C = devclient.new{ crypto, modem, identity, clock, pull, startTimer }
+--   local body, err = C.request("hello", { client = "0.3.0", caps = 2 })
+local ext = require("lib.extproto")
+local proto = require("lib.proto")
+
+local devclient = {}
+local SEQ = 4096
+
+function devclient.new(opts)
+  local crypto, modem, id, clock = opts.crypto, opts.modem, opts.identity, opts.clock
+  local pull, startTimer = opts.pull, opts.startTimer
+  local lastSent, lastHeard, nextId = 0, 0, clock() % 100000
+  local C = {}
+
+  modem.open(proto.CH.OUT)
+
+  -- Returns the reply body, or nil plus an error code ("timeout", "bad_request", or the server's).
+  function C.request(msgType, body, timeoutSecs, tries)
+    nextId = nextId + 1
+    local msg = { v = proto.VERSION, t = msgType, id = nextId, ts = clock(), b = body or {} }
+    local ok = proto.validate(msg)
+    if not ok then return nil, "bad_request" end -- a bug on our side: never send it
+    for _ = 1, tries or 2 do
+      local counter = math.max(clock() * SEQ, lastSent + 1)
+      lastSent = counter
+      msg.ts = clock()
+      modem.transmit(proto.CH.IN, proto.CH.OUT, ext.sealRequest(crypto, id, counter, msg))
+      local timer = startTimer(timeoutSecs or 4)
+      while true do
+        local ev, a, channel, _, payload = pull()
+        if ev == "timer" and a == timer then break end
+        if ev == "modem_message" and channel == proto.CH.OUT then
+          local got = ext.openResponse(crypto, id, payload)
+          if got and got.counter > lastHeard and got.msg.re == msg.id and got.msg.t == msgType
+              and proto.validateResponse(got.msg) then
+            lastHeard = got.counter
+            if got.msg.ok then return got.msg.b end
+            return nil, got.msg.err
+          end
+        end
+      end
+    end
+    return nil, "timeout"
+  end
+
+  return C
+end
+
+return devclient
+]=]
+F["lib/enroll.lua"] = [=[
+-- Registration ("enrolment") of a new pocket or turtle at the owner's desk.
+--
+--  1. The device makes its own keys and broadcasts its PUBLIC keys on the enrolment channel.
+--     It shows a 6-digit code: a fingerprint of those keys.
+--  2. The owner types that code on the REGISTER computer and picks the player.
+--  3. REGISTER records the device and replies (sealed for that device) with its id and the
+--     two edge computers' public keys.
+--  4. Both screens show the same 4-digit check number. If they differ, someone interfered.
+--
+-- The device's secret keys never leave the device.
+local codec = require("lib.codec")
+local S = require("lib.schema")
+
+local enroll = {}
+
+local reqSpec = S.map({ t = S.enum({ "eq" }), kind = S.enum({ "pocket", "worker" }),
+  signPk = S.bytes(32), kxPk = S.bytes(32), n = S.bytes(8) })
+local replySpec = S.map({ t = S.enum({ "er" }), n = S.bytes(8), regPk = S.bytes(32), p = S.bytes(512) })
+local grantSpec = S.map({ id = S.int(1, 2 ^ 31), inPk = S.bytes(32), outPk = S.bytes(32), player = S.str(16) })
+
+local function digits(crypto, data, count)
+  local h, n = crypto.hash(data), 0
+  for i = 1, 6 do n = n * 256 + h:byte(i) end
+  return ("%0" .. count .. "d"):format(n % 10 ^ count)
+end
+
+-- Device: the broadcast frame. identity = { signPk, kxPk }, nonce = 8 random bytes.
+function enroll.request(identity, kind, nonce)
+  return codec.encode({ t = "eq", kind = kind, signPk = identity.signPk, kxPk = identity.kxPk, n = nonce })
+end
+
+-- The 6-digit code both sides compute from the device's public keys.
+function enroll.code(crypto, signPk, kxPk, nonce)
+  return digits(crypto, "bk enroll code|" .. signPk .. kxPk .. nonce, 6)
+end
+
+-- REGISTER: returns { kind, signPk, kxPk, n } or nil.
+function enroll.parseRequest(frame)
+  local req = codec.decode(frame, { maxItems = 8 })
+  if type(req) ~= "table" or not S.check(reqSpec, req) then return nil end
+  if #req.signPk ~= 32 or #req.kxPk ~= 32 or #req.n ~= 8 then return nil end
+  return req
+end
+
+local function replyKey(crypto, mySk, theirPk, nonce)
+  return crypto.kdf("buildkit enroll v1", crypto.exchange(mySk, theirPk) .. nonce)
+end
+
+-- REGISTER: the sealed answer. grant = { id, inPk, outPk, player }.
+function enroll.reply(crypto, regSk, regPk, req, grant)
+  local sealed = crypto.seal(replyKey(crypto, regSk, req.kxPk, req.n), 1, codec.encode(grant), req.n)
+  return codec.encode({ t = "er", n = req.n, regPk = regPk, p = sealed })
+end
+
+-- Device: returns the grant, or nil if the frame is not a valid answer to our request.
+function enroll.openReply(crypto, identity, nonce, frame)
+  local rep = codec.decode(frame, { maxItems = 8 })
+  if type(rep) ~= "table" or not S.check(replySpec, rep) or rep.n ~= nonce or #rep.regPk ~= 32 then return nil end
+  local plain = crypto.open(replyKey(crypto, identity.kxSk, rep.regPk, nonce), 1, rep.p, nonce)
+  if not plain then return nil end
+  local grant = codec.decode(plain, { maxItems = 8 })
+  if type(grant) ~= "table" or not S.check(grantSpec, grant) or #grant.inPk ~= 32 or #grant.outPk ~= 32 then
+    return nil
+  end
+  grant.regPk = rep.regPk
+  return grant
+end
+
+-- The 4-digit number shown on both screens at the end.
+function enroll.checkNumber(crypto, grant, regPk, signPk)
+  return digits(crypto, "bk enroll check|" .. grant.id .. "|" .. grant.inPk .. grant.outPk .. regPk .. signPk, 4)
+end
+
+return enroll
+]=]
+F["lib/extproto.lua"] = [=[
+-- External protocol: how a player's device (pocket or turtle) talks to the two edge computers.
+--
+-- A device has two key pairs: one for signing (Ed25519) and one for key agreement (X25519).
+-- INCOMING and OUTGOING each have their own key-agreement pair.
+--
+--   request  (device -> INCOMING): sealed with the secret shared by the device and INCOMING.
+--            Inside: the encoded message and the device's signature over it.
+--            INCOMING can read it, but cannot forge it: COMPUTE checks the signature again.
+--   response (OUTGOING -> device): sealed with the secret shared by OUTGOING and the device.
+--
+-- Frame on the wire: codec{ v = 1, d = device id, c = counter, p = sealed bytes }
+local codec = require("lib.codec")
+local S = require("lib.schema")
+
+local ext = {}
+
+ext.MAX_FRAME = 8192
+
+local frameSpec = S.map({ v = S.int(1, 1), d = S.int(1, 2 ^ 31), c = S.int(1, 2 ^ 53), p = S.bytes(ext.MAX_FRAME) })
+local innerSpec = S.map({ m = S.bytes(ext.MAX_FRAME), s = S.bytes(64) })
+
+-- Shared keys are slow to compute (elliptic-curve maths in Lua), so they are remembered.
+local keyCache, cacheSize = {}, 0
+local function sharedKey(crypto, dir, mySk, theirPk, devPk, edgePk)
+  local id = dir .. mySk .. theirPk
+  local key = keyCache[id]
+  if not key then
+    if cacheSize >= 256 then keyCache, cacheSize = {}, 0 end
+    key = crypto.kdf("buildkit ext v1 " .. dir, crypto.exchange(mySk, theirPk) .. devPk .. edgePk)
+    keyCache[id], cacheSize = key, cacheSize + 1
+  end
+  return key
+end
+
+local function aad(dir, devId, counter) return dir .. "|" .. devId .. "|" .. counter end
+local function signed(devId, counter, raw) return "bk1|" .. devId .. "|" .. counter .. "|" .. raw end
+
+-- A fresh set of device keys. The secret halves never leave the device.
+function ext.newIdentity(crypto)
+  local signSk, signPk = crypto.signKeypair()
+  local kxSk, kxPk = crypto.kxKeypair()
+  return { signSk = signSk, signPk = signPk, kxSk = kxSk, kxPk = kxPk }
+end
+
+-- Device side. dev = { id, signSk, signPk, kxSk, kxPk, inPk, outPk }.
+function ext.sealRequest(crypto, dev, counter, msg)
+  local raw = codec.encode(msg)
+  local sig = crypto.sign(dev.signSk, dev.signPk, signed(dev.id, counter, raw))
+  local key = sharedKey(crypto, "in", dev.kxSk, dev.inPk, dev.kxPk, dev.inPk)
+  local sealed = crypto.seal(key, counter, codec.encode({ m = raw, s = sig }), aad("in", dev.id, counter))
+  return codec.encode({ v = 1, d = dev.id, c = counter, p = sealed })
+end
+
+-- INCOMING side. lookup(devId) -> { id, signPk, kxPk, revoked } or nil.
+-- Returns { dev, counter, raw, sig, msg, record } or nil plus the reason it was dropped.
+function ext.openRequest(crypto, frame, lookup, inSk, inPk)
+  local f = codec.decode(frame, { maxItems = 8 })
+  if type(f) ~= "table" or not S.check(frameSpec, f) then return nil, "bad_frame" end
+  local record = lookup(f.d)
+  if not record then return nil, "unknown_device" end
+  if record.revoked == 1 or record.revoked == true then return nil, "revoked" end
+  local key = sharedKey(crypto, "in", inSk, record.kxPk, record.kxPk, inPk)
+  local plain = crypto.open(key, f.c, f.p, aad("in", f.d, f.c))
+  if not plain then return nil, "bad_auth" end
+  local inner = codec.decode(plain, { maxItems = 4 })
+  if type(inner) ~= "table" or not S.check(innerSpec, inner) then return nil, "bad_frame" end
+  local msg = codec.decode(inner.m)
+  if type(msg) ~= "table" then return nil, "bad_frame" end
+  return { dev = f.d, counter = f.c, raw = inner.m, sig = inner.s, msg = msg, record = record }
+end
+
+-- COMPUTE side: check the device really signed this exact message with this counter.
+function ext.verifyRequest(crypto, record, counter, raw, sig)
+  if type(raw) ~= "string" or type(record) ~= "table" or type(counter) ~= "number" then return false end
+  return crypto.verify(record.signPk, signed(record.id, counter, raw), sig)
+end
+
+-- OUTGOING side. record = { id, kxPk } of the device the reply is for.
+function ext.sealResponse(crypto, outSk, outPk, record, counter, msg)
+  local key = sharedKey(crypto, "out", outSk, record.kxPk, record.kxPk, outPk)
+  local sealed = crypto.seal(key, counter, codec.encode(msg), aad("out", record.id, counter))
+  return codec.encode({ v = 1, d = record.id, c = counter, p = sealed })
+end
+
+-- Device side. Returns { counter, msg } or nil.
+function ext.openResponse(crypto, dev, frame)
+  local f = codec.decode(frame, { maxItems = 8 })
+  if type(f) ~= "table" or not S.check(frameSpec, f) or f.d ~= dev.id then return nil end
+  local key = sharedKey(crypto, "out", dev.kxSk, dev.outPk, dev.kxPk, dev.outPk)
+  local plain = crypto.open(key, f.c, f.p, aad("out", f.d, f.c))
+  if not plain then return nil end
+  local msg = codec.decode(plain)
+  if type(msg) ~= "table" then return nil end
+  return { counter = f.c, msg = msg }
+end
+
+return ext
+]=]
+F["lib/identity.lua"] = [=[
+-- A device's identity file (/bs/device.lua): its id, owner, own keys and the edge public keys.
+local identity = {}
+
+local BIN = { "signSk", "signPk", "kxSk", "kxPk", "inPk", "outPk" }
+
+local function hex(b) return (b:gsub(".", function(c) return ("%02x"):format(c:byte()) end)) end
+local function unhex(h) return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
+
+function identity.save(fs, path, id)
+  local lines = { "-- This device's identity. SECRET: do not copy.", "return {" }
+  lines[#lines + 1] = ("  id = %d, kind = %q, player = %q,"):format(id.id, id.kind, id.player)
+  for _, k in ipairs(BIN) do lines[#lines + 1] = ('  %s = "%s",'):format(k, hex(id[k])) end
+  lines[#lines + 1] = "}"
+  local h = fs.open(path .. ".tmp", "w")
+  h.write(table.concat(lines, "\n") .. "\n")
+  h.close()
+  if fs.exists(path) then fs.delete(path) end
+  fs.move(path .. ".tmp", path)
+end
+
+-- Returns the identity, or nil if the file is missing or damaged.
+function identity.load(fs, path)
+  local h = fs.open(path, "r")
+  if not h then return nil end
+  local src = h.readAll()
+  h.close()
+  local fn = load(src, "=identity", "t", {})
+  local ok, t = pcall(fn or error)
+  if not ok or type(t) ~= "table" or type(t.id) ~= "number" or type(t.player) ~= "string"
+      or (t.kind ~= "pocket" and t.kind ~= "worker") then
+    return nil
+  end
+  for _, k in ipairs(BIN) do
+    if type(t[k]) ~= "string" or #t[k] ~= 64 or t[k]:find("[^0-9a-f]") then return nil end
+    t[k] = unhex(t[k])
+  end
+  return t
+end
+
+return identity
+]=]
+F["lib/lock.lua"] = [=[
+-- Device lock for pockets and turtles handed to players.
+-- While /bs/.locked exists, /startup.lua (see roles/_common/startup.lua):
+--   * ignores Ctrl+T, so the app cannot be stopped,
+--   * reboots after a crash instead of dropping to a typing prompt,
+-- and booting from a floppy next to the device is switched off.
+-- The owner releases a device from the REGISTER computer; the device learns it on its next hello.
+local lock = {}
+
+lock.MARKER = "/bs/.locked"
+
+function lock.isLocked(fs) return fs.exists(lock.MARKER) end
+
+function lock.engage(fs, settings)
+  local h = fs.open(lock.MARKER, "w")
+  h.write("1")
+  h.close()
+  settings.set("shell.allow_disk_startup", false)
+  settings.save()
+end
+
+function lock.release(fs, settings)
+  if fs.exists(lock.MARKER) then fs.delete(lock.MARKER) end
+  settings.set("shell.allow_disk_startup", true)
+  settings.save()
+end
+
+return lock
 ]=]
 F["lib/log.lua"] = [=[
 -- Small rotating log file. Never throws: a full disk or broken sink must not crash the program.
@@ -1665,6 +2142,79 @@ end
 
 return log
 ]=]
+F["lib/node.lua"] = [=[
+-- Common start-up for base computers: config, keys, modem, log, encrypted bus and rpc.
+--   local N = node.start("compute")
+--   N.cfg, N.keys, N.log, N.bus, N.rpc, N.clock, N.modem, N.ext (edge computers only)
+local config = require("lib.config")
+local specs = require("lib.config_specs")
+local crypto = require("lib.crypto")
+local proto = require("lib.proto")
+local bus = require("lib.bus")
+local rpc = require("lib.rpc")
+local log = require("lib.log")
+local keys_core = require("install.keys_core")
+
+local node = {}
+
+local function wirelessOn(side)
+  if peripheral.getType(side) == "modem" and peripheral.call(side, "isWireless") then
+    return peripheral.wrap(side)
+  end
+end
+
+function node.start(role, opts)
+  opts = opts or {}
+  local cfg, cfgErr = config.load(fs, "/bs/role/config.lua", specs[role])
+  if not cfg then error(cfgErr, 0) end
+  local keys, keyErr = keys_core.load(fs, "/bs/keys.lua")
+  if not keys then error(keyErr, 0) end
+
+  local modem, ext
+  if cfg.busSide then
+    -- edge computer: two modems, told apart by the side they are on
+    modem = wirelessOn(cfg.busSide)
+    ext = wirelessOn(cfg.extSide)
+    if not modem then error("no wireless modem on the " .. cfg.busSide .. " side (busSide in config)", 0) end
+    if not ext then error("no ender modem on the " .. cfg.extSide .. " side (extSide in config)", 0) end
+  else
+    for _, name in ipairs(peripheral.getNames()) do
+      modem = modem or wirelessOn(name)
+    end
+    if not modem then error("no wireless modem attached", 0) end
+  end
+
+  if not crypto.ready() then crypto.initWithTiming() end
+  local function clock() return os.epoch("utc") end
+  local L = log.new({ fs = fs, path = "/bs/log.txt", level = cfg.log.level, keepKB = cfg.log.keepKB, clock = clock })
+  local B = bus.new({ modem = modem, channel = proto.CH.BUS, role = role, instance = opts.instance or 1,
+    keys = keys, crypto = crypto, clock = clock })
+  local R = rpc.new({ bus = B, pull = os.pullEvent, startTimer = os.startTimer, queueEvent = os.queueEvent,
+    clock = clock, onError = function(method, err) L.error("rpc", "handler crashed", { method = method, err = err }) end })
+  L.info(role, "started")
+  return { role = role, cfg = cfg, keys = keys, crypto = crypto, clock = clock, log = L, bus = B, rpc = R,
+    modem = modem, ext = ext }
+end
+
+-- An edge computer's own key pair, created on first start and kept on its disk.
+function node.edgeKey(path)
+  local function hex(b) return (b:gsub(".", function(c) return ("%02x"):format(c:byte()) end)) end
+  local function unhex(h) return (h:gsub("..", function(x) return string.char(tonumber(x, 16)) end)) end
+  local h = fs.open(path, "r")
+  if h then
+    local sk, pk = h.readAll():match("^(%x+) (%x+)")
+    h.close()
+    if sk and #sk == 64 and #pk == 64 then return unhex(sk), unhex(pk) end
+  end
+  local sk, pk = crypto.kxKeypair()
+  h = fs.open(path, "w")
+  h.write(hex(sk) .. " " .. hex(pk))
+  h.close()
+  return sk, pk
+end
+
+return node
+]=]
 F["lib/proto.lua"] = [=[
 -- Protocol v1: channels, limits, and the exact shape of every message.
 -- Anything not described here is rejected. See docs/protocol.md (generated from this file).
@@ -1673,7 +2223,7 @@ local S = require("lib.schema")
 local proto = {}
 
 proto.VERSION = 1
-proto.CH = { IN = 4201, OUT = 4202, BUS = 4210, TEL = 4211 }
+proto.CH = { IN = 4201, OUT = 4202, ENROLL = 4203, BUS = 4210, TEL = 4211 }
 
 proto.LIMITS = {
   frameDefault = 2048,      -- bytes, normal max frame
@@ -1791,8 +2341,9 @@ local mats = S.array(itemCount, 64)
 local dim = S.int(1, 64)
 
 proto.responses = {
+  -- unlock = true tells a locked device its owner has released it (it then drops to a normal prompt)
   ["hello"] = S.map({ server = S.str(16), minClient = S.str(16), time = S.int(0, 2 ^ 53),
-    state = S.enum({ "ok", "maintenance" }) }),
+    state = S.enum({ "ok", "maintenance" }) }, { unlock = S.bool() }),
   ["shape.preview"] = S.map({ w = dim, h = dim, d = dim, count = count, mats = mats }),
   ["job.quote"] = S.map({ quote = S.tok(24), count = count, mats = mats, raw = mats, hand = count,
     eta = S.int(0, 10000000), queue = S.int(0, 10000), turtles = S.int(1, 8), expires = S.int(0, 2 ^ 53) }),
@@ -1881,6 +2432,45 @@ function proto.validateResponse(msg)
 end
 
 return proto
+]=]
+F["lib/ratelimit.lua"] = [=[
+-- Token-bucket rate limiter: each key may burst `burst` requests, then `perMinute` per minute.
+local ratelimit = {}
+
+function ratelimit.new(opts)
+  local burst, perMs, clock = opts.burst, opts.perMinute / 60000, opts.clock
+  local maxKeys = opts.maxKeys or 1024
+  local buckets, count = {}, 0
+  local rl = {}
+
+  function rl.allow(key)
+    local now = clock()
+    local b = buckets[key]
+    if not b then
+      if count >= maxKeys then
+        -- forget everything rather than grow without limit; worst case a flooder gets one new burst
+        buckets, count = {}, 0
+      end
+      b = { tokens = burst, at = now }
+      buckets[key], count = b, count + 1
+    end
+    if now > b.at then
+      b.tokens = math.min(burst, b.tokens + (now - b.at) * perMs)
+      b.at = now
+    end
+    if b.tokens >= 1 then
+      b.tokens = b.tokens - 1
+      return true
+    end
+    return false
+  end
+
+  function rl.size() return count end
+
+  return rl
+end
+
+return ratelimit
 ]=]
 F["lib/rpc.lua"] = [=[
 -- Request/reply on top of the bus.
@@ -2253,8 +2843,10 @@ local RETRY = { timeout = true, busy = true }
 
 function storeclient.new(opts)
   local R, sleep = opts.rpc, opts.sleep
-  local retries = opts.retries or 3
-  local timeout = opts.timeoutSecs or 15
+  -- short waits and several tries: a storage manager that just started (or just took over)
+  -- stays silent for a few seconds, and a quick retry beats one long wait
+  local retries = opts.retries or 4
+  local timeout = opts.timeoutSecs or 6
   local nextUp = 0
   local C = {}
 
@@ -2350,30 +2942,38 @@ end
 return storeclient
 ]=]
 F["manifest.lua"] = [=[
-return { version = "0.2.5", roles = {
+return { version = "0.3.0", roles = {
   ["compute"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2396,30 +2996,41 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
     { path = "roles/compute/config.lua", dest = "/bs/role/config.lua", size = 1968, sha256 = "7999f0f41ddb2cfaf381c27d8b985cbd7a3a2a41c6c390137bcd9fa1a578140d" },
+    { path = "roles/compute/dispatch.lua", dest = "/bs/roles/compute/dispatch.lua", size = 2557, sha256 = "bc4da29cbccb1e807742c35bb75f6866239108913e5ac1b88db012733cd0b962" },
+    { path = "roles/compute/main.lua", dest = "/bs/role/main.lua", size = 3301, sha256 = "418cb90f3ca57718992f476c33005bd21e8f613e3e71587da34519209929f95c" },
+    { path = "roles/compute/registry.lua", dest = "/bs/roles/compute/registry.lua", size = 2424, sha256 = "8aefa7b0c6b33c584c6a551c8de1b3e1e764eebe908aa402ae4f46862a3ac9eb" },
   },
   ["gps"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2448,24 +3059,32 @@ return { version = "0.2.5", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2487,31 +3106,41 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/util.lua", dest = "/bs/ccryptolib/util.lua", size = 1312, sha256 = "cdce1c0e75a4e56097853e4aa85fb76366866078e4694db00ebc958785c96caf" },
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
-    { path = "roles/incoming/config.lua", dest = "/bs/role/config.lua", size = 578, sha256 = "edb4587aaff94d49a0072144ed952af1dd7f62723bae36970d301245bea79c39" },
+    { path = "roles/incoming/config.lua", dest = "/bs/role/config.lua", size = 762, sha256 = "8ef4da716336c5021f53d02e89f7e133c913451d1d52870ac3e1fe81672f22f6" },
+    { path = "roles/incoming/gate.lua", dest = "/bs/roles/incoming/gate.lua", size = 4263, sha256 = "4b511682ff9fb361c2367784451dad69c2c4d2db3b8fde5934fc4f90af5c574b" },
+    { path = "roles/incoming/main.lua", dest = "/bs/role/main.lua", size = 1277, sha256 = "cb21d4c37c2a4f9d479c5cbefa5205c2f8bcc6e4328c0ec4efe99d7b08924217" },
   },
   ["ingest"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2540,24 +3169,32 @@ return { version = "0.2.5", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2586,24 +3223,32 @@ return { version = "0.2.5", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2625,31 +3270,41 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/util.lua", dest = "/bs/ccryptolib/util.lua", size = 1312, sha256 = "cdce1c0e75a4e56097853e4aa85fb76366866078e4694db00ebc958785c96caf" },
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
-    { path = "roles/outgoing/config.lua", dest = "/bs/role/config.lua", size = 419, sha256 = "d0497198d4e53c00b033e95b0efdd0f4e2019464b5bbbc7a8e95404d2f9f3f9e" },
+    { path = "roles/outgoing/config.lua", dest = "/bs/role/config.lua", size = 600, sha256 = "1b63a3ea5970f1549aa2bc59e0c3a04099c84cc55a9aac8372e8321fd401abb0" },
+    { path = "roles/outgoing/gate.lua", dest = "/bs/roles/outgoing/gate.lua", size = 1199, sha256 = "5691d89e4f3ab5e6727b2ed3993c19083419fe888163c75bf07cbdf82700a8bf" },
+    { path = "roles/outgoing/main.lua", dest = "/bs/role/main.lua", size = 937, sha256 = "80a2054e88faa4b86a18ce1faea49d67932055a137089ecbbf77d5e11b95ea29" },
   },
   ["pocket"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2672,30 +3327,39 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
     { path = "roles/pocket/config.lua", dest = "/bs/role/config.lua", size = 416, sha256 = "baa68559d18844060ebc4c59e4e1e0276cf621725a52546cc79a2182d9b37cda" },
+    { path = "roles/pocket/main.lua", dest = "/bs/role/main.lua", size = 1046, sha256 = "a3b01fabe415f7881fb7813e1701f55492b9ea4ef42e9c7668d50b088e1393b1" },
   },
   ["register"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2718,30 +3382,40 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
     { path = "roles/register/config.lua", dest = "/bs/role/config.lua", size = 476, sha256 = "f5766e0dd31f2aed84c321984273b8439ad2ef3e075106edb753b7521c9f9ab3" },
+    { path = "roles/register/main.lua", dest = "/bs/role/main.lua", size = 4595, sha256 = "e671db45bc60bce7b782f6e347c577341ae70b154af7b6d152b6e0fd4049fd10" },
+    { path = "roles/register/registrar.lua", dest = "/bs/roles/register/registrar.lua", size = 4599, sha256 = "9b4d490262fcaedbf07d07e38ca7aa28cff3775e919e7042f69c60c461d44257" },
   },
   ["storage"] = {
     { path = "lib/base64.lua", dest = "/bs/lib/base64.lua", size = 1927, sha256 = "62fb218cdb68e781588899dae88cda0905243e283c132a23484453d2364eb075" },
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2774,24 +3448,32 @@ return { version = "0.2.5", roles = {
     { path = "lib/bus.lua", dest = "/bs/lib/bus.lua", size = 3156, sha256 = "7a92c5f087041d3efadf5982b402615c1e206b7045e7d0878393b33c58cb275d" },
     { path = "lib/codec.lua", dest = "/bs/lib/codec.lua", size = 5005, sha256 = "afa624bd1a489550c05ff69434777ca2e875d0700ed8833e2d6d03dd1ef3512c" },
     { path = "lib/config.lua", dest = "/bs/lib/config.lua", size = 2911, sha256 = "34732f03864dc735cc444ba2b3bdbadf7835aa6e40cf1f4b4a5bae91f1166e59" },
-    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 2901, sha256 = "600eb2a0057d3be275b2a25ec36c0166d4dedeeadbb01286fda8f010a2633a6b" },
-    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 2491, sha256 = "0eabb85d13eb7cdcd1e60b47c3401a75f2bd3aa03ad9f876c73c3a5f1e147486" },
+    { path = "lib/config_specs.lua", dest = "/bs/lib/config_specs.lua", size = 3236, sha256 = "18a7163c36f6a06ad66f00ea02dd82b9a21eadef0b0d91fbaa4ec8e5e42bae01" },
+    { path = "lib/crypto.lua", dest = "/bs/lib/crypto.lua", size = 3475, sha256 = "9b08efa8490a7cbf0a03a9a55ebf2198f5eb3e636233b5272b5c3859380ab51a" },
+    { path = "lib/devapp.lua", dest = "/bs/lib/devapp.lua", size = 3419, sha256 = "d63739e99b2a5f2b10b72c362e6d0faeebc22b663b15bdaadfff7394094f231a" },
+    { path = "lib/devclient.lua", dest = "/bs/lib/devclient.lua", size = 1952, sha256 = "de8da9f15c625fede8c127d8dba24ac337610c0e8ed5b2043fb2632c9a9b63de" },
+    { path = "lib/enroll.lua", dest = "/bs/lib/enroll.lua", size = 3356, sha256 = "2adc2e98b54e73a8e70b86efe2719dc776fdd6016e91b2ae166da6d27a0f699d" },
+    { path = "lib/extproto.lua", dest = "/bs/lib/extproto.lua", size = 4796, sha256 = "587aab134fcc820e38367b141b86c308fcf6c66e23930b79afc2c2cf6645cb43" },
+    { path = "lib/identity.lua", dest = "/bs/lib/identity.lua", size = 1530, sha256 = "c730fe6c09d56309d943deee072ddf2c59d0e8ee9c92a8bfe1bf2de02452f631" },
+    { path = "lib/lock.lua", dest = "/bs/lib/lock.lua", size = 880, sha256 = "d7a95ce863eee004a71cae2f710609e7631299810af252945468bca6501a3b08" },
     { path = "lib/log.lua", dest = "/bs/lib/log.lua", size = 2154, sha256 = "2b6ae0ade22913051f03e5e6f5a2c446cf0f4c3a2b465f07d727247784d73cfe" },
-    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 10902, sha256 = "24b68df1976c8dc559d5786ea579d4f8bfd47b3be7bbec016bd99929a198ba83" },
+    { path = "lib/node.lua", dest = "/bs/lib/node.lua", size = 2952, sha256 = "2eb6f6ec8d96e074b3dd8f25fc6402ed3f107f67274bd86604c7328e6b83f4cc" },
+    { path = "lib/proto.lua", dest = "/bs/lib/proto.lua", size = 11042, sha256 = "379fcc7345d9c835731c99125612cc1b5f047c72df1fb7476255f620cec0db84" },
+    { path = "lib/ratelimit.lua", dest = "/bs/lib/ratelimit.lua", size = 959, sha256 = "da669351c2220f3b1322ec8550c08c8615ad346455bd4e6ab652cd4a8c5cdfa3" },
     { path = "lib/rpc.lua", dest = "/bs/lib/rpc.lua", size = 3691, sha256 = "458db6de7c8c9b1e68f2987df707fe35659b9b8be5fa31b1b869515ea8a55d0f" },
     { path = "lib/schema.lua", dest = "/bs/lib/schema.lua", size = 5776, sha256 = "245e926f2c323edfc1292afdd02caa5a1d925b91e5288f1931ea833be15e7ba0" },
     { path = "lib/sha256.lua", dest = "/bs/lib/sha256.lua", size = 3512, sha256 = "2958e0101a3cd28662a7b07e208afdd09cde9078282e4b4f65d842e6ee89fdbc" },
-    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3759, sha256 = "f2741475f2088692eddb50a8340d837429f7b6914b0e128f15b305ae445174e3" },
+    { path = "lib/storeclient.lua", dest = "/bs/lib/storeclient.lua", size = 3925, sha256 = "7ce1974655cae027372f795cb3b95d2507ecf7a6fafb4891d984a1cf6b9e5971" },
     { path = "install/install.lua", dest = "/bs/install/install.lua", size = 2993, sha256 = "eeeb97fc63687423d71fb3e566048b8c02e386884574baa787dfed6fdfa4966b" },
-    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 4475, sha256 = "3506c96d1f3733ee1f466ccd144f56554f2783bfae7fccd6e2e15ef455b23994" },
+    { path = "install/installer_core.lua", dest = "/bs/install/installer_core.lua", size = 5049, sha256 = "789c7473c562265dd1398f1fbe602b68584cd4f4ec6c630e6e5d5a36f2aaf3d9" },
     { path = "install/keys_core.lua", dest = "/bs/install/keys_core.lua", size = 2168, sha256 = "89cc5a6bab2ee9ac34c63a7b60a6c9181a8d61abe8ea48ba98f011505f160d52" },
     { path = "install/mkkeys.lua", dest = "/bs/install/mkkeys.lua", size = 2232, sha256 = "f8bb38452d641603fb969876ae7b6c5dcb68a022d31cd3b4edcab1306efbe2f3" },
-    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 8236, sha256 = "346a5c59bee23e276c48071ae5fef8aeeb167f058435f1a7beae589bca439972" },
-    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3091, sha256 = "32317821e4ac9f473826571b1c5de7a63ff963c67027f8f12349fd311b5262b2" },
+    { path = "install/setup.lua", dest = "/bs/install/setup.lua", size = 9673, sha256 = "7a52a37d80bbeb67b53bbe156d84df2c991063867b2a3b7a98c46a19feee6f59" },
+    { path = "install/setup_ui.lua", dest = "/bs/install/setup_ui.lua", size = 3299, sha256 = "5dc4d7520b4f53f3c0f6defa50be2bb322ca6ab209a21fa0072db120ea7756c7" },
     { path = "install/storetest.lua", dest = "/bs/install/storetest.lua", size = 3497, sha256 = "c84567e3f6b093e68d0a93862279fbfe3e45c1f19efda8c2a0d40f3af5c8e198" },
     { path = "install/verify.lua", dest = "/bs/install/verify.lua", size = 2216, sha256 = "2533b7c381976974b0467ba2e2d16acccff5603b6d3fdea39d8ee6b65375ddbd" },
     { path = "install/verify_core.lua", dest = "/bs/install/verify_core.lua", size = 10715, sha256 = "4ffda52ad53368d0b71c912a6b13c890c30906e2e42e618e51e0fa806bd2bd55" },
-    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 1736, sha256 = "838b2f8848d67fec32b0c56f74d2a768d4179c59e05ab1e30d2a3f9b3a5c673f" },
+    { path = "roles/_common/startup.lua", dest = "/startup.lua", size = 2406, sha256 = "b38dddce591c32e460eb818f7f375aabf8b99961c7573f333b8014668cc26f77" },
     { path = "roles/_common/setup.lua", dest = "/setup.lua", size = 110, sha256 = "dd3ee91605b7db2a7c4754a0df31923209807e73d7cbee5db5d4717241645888" },
     { path = "vendor/ccryptolib/aead.lua", dest = "/bs/ccryptolib/aead.lua", size = 3866, sha256 = "738c69c55a2894ffde108267dbdc4ae2d953d6b3122dbc03002389fe65fb67a0" },
     { path = "vendor/ccryptolib/blake3.lua", dest = "/bs/ccryptolib/blake3.lua", size = 8917, sha256 = "a495f9ab1c7ffaeeb6a273788adce9ba2fbe2012a5ba46bd8bce0624698982d1" },
@@ -2814,6 +3496,7 @@ return { version = "0.2.5", roles = {
     { path = "vendor/ccryptolib/x25519.lua", dest = "/bs/ccryptolib/x25519.lua", size = 1350, sha256 = "f8618a0641c48721f21ea1dfc63a06eafb75efc4be6fbcc6a2939dc80a55c72b" },
     { path = "vendor/ccryptolib/x25519c.lua", dest = "/bs/ccryptolib/x25519c.lua", size = 6568, sha256 = "1dcf554322d946a426bc04cfb4936ab740aa75078fa7209b6ac1b032d4fbe222" },
     { path = "roles/worker/config.lua", dest = "/bs/role/config.lua", size = 436, sha256 = "1f37796015db0ede2ae5c0384d2a182e68fecb8ec7f5a45a4e9f983d0809fab2" },
+    { path = "roles/worker/main.lua", dest = "/bs/role/main.lua", size = 1046, sha256 = "c52d951a18bb90afcf400449de5a76e8d9bb6e5968bee96abe3cc95de85de042" },
   },
 } }
 ]=]
@@ -2846,6 +3529,10 @@ if fs.exists("/bs/.installing") then
   return
 end
 
+-- A device handed to a player is locked: Ctrl+T is ignored and a crash never ends at a prompt.
+local locked = fs.exists("/bs/.locked")
+if locked then os.pullEvent = os.pullEventRaw end
+
 local fn, loadErr = loadfile(MAIN, nil, _ENV)
 if not fn then
   printError("Cannot start " .. MAIN .. ": " .. tostring(loadErr))
@@ -2854,7 +3541,11 @@ if not fn then
 end
 
 local ok, err = pcall(fn)
-if ok then return end
+if ok then
+  -- a locked program should never end; if it does (unless it just unlocked itself), start it again
+  if locked and fs.exists("/bs/.locked") then os.reboot() end
+  return
+end
 
 -- crashed: log it (keeping the log small), then reboot unless it keeps happening
 local now = os.epoch("utc")
@@ -2870,6 +3561,13 @@ pcall(writeAll, CRASHES, count .. " " .. first)
 
 printError("Program crashed: " .. tostring(err):sub(1, 200))
 if count > 5 then
+  if locked then
+    -- stay here instead of giving a prompt; the owner can still unlock or re-install it
+    -- (it keeps retrying once a minute, so a passing problem heals and the owner can still unlock it)
+    printError("This device has a fault. Please return it to the owner.")
+    sleep(60)
+    os.reboot()
+  end
   printError("Crashed " .. count .. " times in a row. Stopped. See " .. CRASH_LOG)
   return
 end
@@ -2920,6 +3618,229 @@ return {
   heartbeatSecs = 5,
 }
 ]=]
+F["roles/compute/dispatch.lua"] = [=[
+-- COMPUTE request dispatcher. Takes what INCOMING forwarded, checks the device's signature again
+-- (so a compromised gateway cannot invent requests), then runs the handler for that message type.
+local ext = require("lib.extproto")
+local proto = require("lib.proto")
+local codec = require("lib.codec")
+
+local dispatch = {}
+
+function dispatch.new(opts)
+  local crypto, registry, clock = opts.crypto, opts.registry, opts.clock
+  local lastSeen = {}
+  local D = { handlers = opts.handlers or {}, stats = { ok = 0, dropped = 0, errors = 0 } }
+
+  local function drop(why)
+    D.stats.dropped = D.stats.dropped + 1
+    if opts.log then opts.log.warn("dispatch", "request dropped", { why = why }) end
+    return nil, why
+  end
+
+  -- req = { d = device id, c = counter, m = encoded message, s = signature }
+  function D.onRequest(req)
+    if type(req) ~= "table" or type(req.c) ~= "number" then return drop("bad_forward") end
+    local record = registry.get(req.d)
+    if not record then return drop("unknown_device") end
+    if record.revoked == 1 then return drop("revoked") end
+    if not ext.verifyRequest(crypto, record, req.c, req.m, req.s) then return drop("bad_signature") end
+    if req.c <= (lastSeen[record.id] or 0) then return drop("replay") end
+    lastSeen[record.id] = req.c
+    local msg = codec.decode(req.m)
+    if type(msg) ~= "table" or not proto.validate(msg) then return drop("bad_request") end
+
+    local response = { v = proto.VERSION, t = msg.t, re = msg.id, ok = false }
+    local handler = D.handlers[msg.t]
+    if not handler then
+      response.err = "bad_request"
+    else
+      local ok, body, err = pcall(handler, { dev = record, player = record.player, now = clock() }, msg.b)
+      if not ok then
+        D.stats.errors = D.stats.errors + 1
+        if opts.log then opts.log.error("dispatch", "handler crashed", { t = msg.t, err = body }) end
+        response.err = "internal"
+      elseif body == nil then
+        response.err = err or "internal"
+      else
+        response.ok, response.b = true, body
+      end
+    end
+    if not proto.validateResponse(response) then
+      -- a handler returned something that does not match the protocol: never send it out
+      D.stats.errors = D.stats.errors + 1
+      if opts.log then opts.log.error("dispatch", "handler returned an invalid reply", { t = msg.t }) end
+      response = { v = proto.VERSION, t = msg.t, re = msg.id, ok = false, err = "internal" }
+    end
+    D.stats.ok = D.stats.ok + 1
+    opts.send(record, response)
+    return true
+  end
+
+  return D
+end
+
+return dispatch
+]=]
+F["roles/compute/main.lua"] = [=[
+-- COMPUTE program: the brain of the base. Phase 3: device registry and the "hello" request.
+local node = require("lib.node")
+local storeclient = require("lib.storeclient")
+local registry = require("roles.compute.registry")
+local dispatch = require("roles.compute.dispatch")
+
+local VERSION = "0.3.0"
+
+local N = node.start("compute")
+local store = storeclient.new({ rpc = N.rpc, sleep = sleep })
+local Reg = registry.new({ store = store, clock = N.clock })
+
+local D = dispatch.new({
+  crypto = N.crypto, registry = Reg, clock = N.clock, log = N.log,
+  send = function(record, response)
+    N.rpc.notify("outgoing", "res", { d = { id = record.id, kxPk = record.kxPk }, msg = response })
+  end,
+  handlers = {
+    hello = function(ctx)
+      local body = { server = VERSION, minClient = VERSION, time = ctx.now, state = "ok" }
+      if ctx.dev.unlock == 1 then body.unlock = true end
+      return body
+    end,
+  },
+})
+
+local function public(rec)
+  return { id = rec.id, kind = rec.kind, player = rec.player, signPk = rec.signPk, kxPk = rec.kxPk,
+    revoked = rec.revoked, unlock = rec.unlock }
+end
+
+local ADMIN = { register = true, monitor = true }
+
+local handlers = {
+  req = function(body, src)
+    if src == "incoming" then D.onRequest(body) end
+  end,
+  dev_get = function(body, src)
+    if src ~= "incoming" and not ADMIN[src] then return nil, "not_allowed" end
+    local rec, err = Reg.get(body.id)
+    if not rec then return nil, err or "not_found" end
+    return public(rec)
+  end,
+  dev_add = function(body, src)
+    if src ~= "register" then return nil, "not_allowed" end
+    if (body.kind ~= "pocket" and body.kind ~= "worker") or type(body.player) ~= "string"
+        or not body.player:find("^[A-Za-z0-9_]+$") or #body.player > 16
+        or type(body.signPk) ~= "string" or #body.signPk ~= 32
+        or type(body.kxPk) ~= "string" or #body.kxPk ~= 32 then
+      return nil, "bad_request"
+    end
+    local id, err = Reg.add(body.kind, body.player, body.signPk, body.kxPk)
+    if not id then return nil, err end
+    N.log.info("registry", "device added", { id = id, kind = body.kind, player = body.player })
+    return { id = id }
+  end,
+  dev_list = function(body, src)
+    if not ADMIN[src] then return nil, "not_allowed" end
+    local list, err = Reg.list(type(body.player) == "string" and body.player or nil)
+    if not list then return nil, err end
+    local out = {}
+    for i = 1, math.min(#list, 100) do
+      local r = list[i]
+      out[i] = { id = r.id, kind = r.kind, player = r.player, revoked = r.revoked, unlock = r.unlock }
+    end
+    return { devices = out }
+  end,
+  dev_set = function(body, src)
+    if not ADMIN[src] then return nil, "not_allowed" end
+    local fields = {}
+    if body.revoked == 0 or body.revoked == 1 then fields.revoked = body.revoked end
+    if body.unlock == 0 or body.unlock == 1 then fields.unlock = body.unlock end
+    local ok, err = Reg.update(body.id, fields)
+    if not ok then return nil, err end
+    N.rpc.notify("incoming", "dev_drop", { id = body.id })
+    N.log.info("registry", "device changed", { id = body.id, revoked = fields.revoked, unlock = fields.unlock })
+    return {}
+  end,
+  stats = function() return D.stats end,
+}
+
+print("COMPUTE running.")
+parallel.waitForAny(N.rpc.pumpLoop, function() N.rpc.serveLoop(handlers) end)
+]=]
+F["roles/compute/registry.lua"] = [=[
+-- Device registry: which pockets and turtles exist, whose they are, and their public keys.
+-- Kept in storage (namespace "players", keys "dev-00000001" ...), with a copy in memory.
+local registry = {}
+
+local function key(id) return ("dev-%08d"):format(id) end
+
+function registry.new(opts)
+  local store, clock = opts.store, opts.clock
+  local cache = {}
+  local Reg = {}
+
+  -- Returns the record or nil. Records: { id, kind, player, signPk, kxPk, revoked, unlock, created }.
+  function Reg.get(id)
+    if type(id) ~= "number" or id < 1 or id % 1 ~= 0 then return nil end
+    if cache[id] == nil then
+      local rec, err = store.getTable("players", key(id))
+      if not rec and err ~= "not_found" then return nil, err end
+      cache[id] = rec or false
+    end
+    return cache[id] or nil
+  end
+
+  local function save(rec)
+    local ok, err = store.putTable("players", key(rec.id), rec)
+    if not ok then cache[rec.id] = nil; return nil, err end
+    cache[rec.id] = rec
+    return true
+  end
+
+  -- Register a new device. Returns its id.
+  function Reg.add(kind, player, signPk, kxPk)
+    local counter = store.getTable("config", "dev-next") or { n = 1 }
+    local id = counter.n
+    -- never reuse an id, even if the counter was lost
+    while Reg.get(id) do id = id + 1 end
+    local ok, err = store.putTable("config", "dev-next", { n = id + 1 })
+    if not ok then return nil, err end
+    ok, err = save({ id = id, kind = kind, player = player, signPk = signPk, kxPk = kxPk,
+      revoked = 0, unlock = 0, created = clock() })
+    if not ok then return nil, err end
+    return id
+  end
+
+  function Reg.update(id, fields)
+    local rec, err = Reg.get(id)
+    if not rec then return nil, err or "not_found" end
+    local copy = {}
+    for k, v in pairs(rec) do copy[k] = v end
+    for k, v in pairs(fields) do copy[k] = v end
+    return save(copy)
+  end
+
+  -- All devices (optionally only one player's). Reads storage, so not for hot paths.
+  function Reg.list(player)
+    local out, after = {}, nil
+    while true do
+      local keys, more = store.list("players", "dev-", after, 200)
+      if not keys then return nil, more end
+      for _, k in ipairs(keys) do
+        local rec = Reg.get(tonumber(k:sub(5)))
+        if rec and (not player or rec.player == player) then out[#out + 1] = rec end
+        after = k
+      end
+      if not more then break end
+    end
+    return out
+  end
+
+  return Reg
+end
+
+return registry
+]=]
 F["roles/gps/config.lua"] = [=[
 -- GPS host config. Stand where the computer is, press F3, and copy the block coordinates here.
 return {
@@ -2930,6 +3851,8 @@ return {
 F["roles/incoming/config.lua"] = [=[
 -- INCOMING gateway config.
 return {
+  extSide = "top",     -- side the ENDER modem is on (hears players' pockets and turtles)
+  busSide = "back",    -- side the normal WIRELESS modem is on (talks to your base computers)
   frameMax = 8192,     -- biggest message accepted, in bytes
   clockSkewSecs = 120, -- how far a message's timestamp may be from server time
   rate = { burst = 5, perMinute = 60 },         -- per pocket
@@ -2939,6 +3862,159 @@ return {
   -- How often (seconds) this computer tells the monitor room it is alive.
   heartbeatSecs = 5,
 }
+]=]
+F["roles/incoming/gate.lua"] = [=[
+-- INCOMING gateway logic. Every frame from a player's device passes through handle().
+-- Order of checks (cheapest first, nothing expensive for strangers):
+--   size -> frame shape -> rate limit -> device known and not revoked -> decrypt/authenticate
+--   -> replay and clock checks -> message matches the schema -> message type allowed for this device
+-- Only then is the request forwarded inward, together with the device's signature.
+local ext = require("lib.extproto")
+local proto = require("lib.proto")
+local codec = require("lib.codec")
+local ratelimit = require("lib.ratelimit")
+
+local gate = {}
+
+local QUEUE_MAX = 64
+local CACHE_MS, MISS_MS = 60000, 10000
+local SEQ = 4096
+
+-- message types either kind of device may send
+local SHARED = { hello = true, rekey = true }
+
+function gate.new(opts)
+  local crypto, cfg, clock = opts.crypto, opts.cfg, opts.clock
+  local skewMs = cfg.clockSkewSecs * 1000
+  local pocketRate = ratelimit.new({ burst = cfg.rate.burst, perMinute = cfg.rate.perMinute, clock = clock })
+  local workerRate = ratelimit.new({ burst = cfg.workerRate.burst, perMinute = cfg.workerRate.perMinute, clock = clock })
+  local strangerRate = ratelimit.new({ burst = 10, perMinute = 60, clock = clock })
+  local cache = {}     -- devId -> { record = ..., at = ms }  (record false = known to be unknown)
+  local lastSeen = {}  -- devId -> highest counter accepted
+  local queue = {}
+  local G = { stats = {} }
+
+  local function count(reason)
+    G.stats[reason] = (G.stats[reason] or 0) + 1
+    return reason
+  end
+
+  local function lookup(id)
+    local now = clock()
+    local c = cache[id]
+    if c and now - c.at < (c.record and CACHE_MS or MISS_MS) then return c.record or nil end
+    -- asking inside costs time: strangers only get a few lookups
+    if not (c and c.record) and not strangerRate.allow("lookup") then return nil end
+    local record = opts.lookup(id)
+    cache[id] = { record = record or false, at = now }
+    return record
+  end
+
+  -- COMPUTE calls this when a device was revoked, re-keyed or removed.
+  function G.drop(id) cache[id] = nil end
+
+  -- Check one frame. Returns "ok" or the reason it was dropped.
+  function G.handle(frame)
+    if type(frame) ~= "string" then return count("bad_frame") end
+    if #frame > cfg.frameMax then return count("too_big") end
+    local outer = codec.decode(frame, { maxItems = 8 })
+    if type(outer) ~= "table" or type(outer.d) ~= "number" then return count("bad_frame") end
+
+    local got, reason = ext.openRequest(crypto, frame, function(id)
+      local record = lookup(id)
+      if record then
+        local rl = record.kind == "worker" and workerRate or pocketRate
+        if not rl.allow(id) then return { limited = true, kxPk = record.kxPk, revoked = record.revoked } end
+      end
+      return record
+    end, opts.inSk, opts.inPk)
+    if not got then return count(reason) end
+    if got.record.limited then return count("rate_limited") end
+
+    if got.counter <= (lastSeen[got.dev] or 0) then return count("replay") end
+    local now = clock()
+    local age = now - math.floor(got.counter / SEQ)
+    if age > skewMs or age < -skewMs then return count("stale") end
+    lastSeen[got.dev] = got.counter
+
+    local msg = got.msg
+    if not proto.validate(msg) then return count("bad_request") end
+    if msg.ts - now > skewMs or now - msg.ts > skewMs then return count("stale") end
+    local workerType = msg.t:sub(1, 2) == "w."
+    if not SHARED[msg.t] and workerType ~= (got.record.kind == "worker") then return count("not_allowed") end
+
+    opts.forward({ d = got.dev, c = got.counter, m = got.raw, s = got.sig })
+    return count("ok")
+  end
+
+  -- Frames arrive faster than they can be checked; keep a short queue and drop the rest.
+  function G.enqueue(frame)
+    if type(frame) ~= "string" then return count("bad_frame") end
+    if #frame > cfg.frameMax then return count("too_big") end
+    if #queue >= QUEUE_MAX then return count("queue_full") end
+    queue[#queue + 1] = frame
+  end
+
+  function G.queued() return #queue end
+
+  -- Handle one queued frame. Returns false when the queue is empty.
+  function G.processOne()
+    local frame = table.remove(queue, 1)
+    if not frame then return false end
+    G.handle(frame)
+    return true
+  end
+
+  return G
+end
+
+return gate
+]=]
+F["roles/incoming/main.lua"] = [=[
+-- INCOMING gateway program: the only computer that listens to players' devices.
+local node = require("lib.node")
+local proto = require("lib.proto")
+local gate = require("roles.incoming.gate")
+
+local N = node.start("incoming")
+local inSk, inPk = node.edgeKey("/bs/edge_key.txt")
+N.ext.open(proto.CH.IN)
+
+local G = gate.new({
+  crypto = N.crypto, cfg = N.cfg, clock = N.clock, inSk = inSk, inPk = inPk,
+  lookup = function(id)
+    local record = N.rpc.call("compute", "dev_get", { id = id }, 3)
+    return record
+  end,
+  forward = function(req) N.rpc.notify("compute", "req", req) end,
+})
+
+local handlers = {
+  pubkey = function() return { pk = inPk } end,
+  dev_drop = function(body, src)
+    if src == "compute" and type(body.id) == "number" then G.drop(body.id) end
+  end,
+  stats = function() return G.stats end,
+}
+
+local function listen()
+  while true do
+    local _, _, channel, _, payload = os.pullEvent("modem_message")
+    if channel == proto.CH.IN then
+      G.enqueue(payload)
+      os.queueEvent("gate_work")
+    end
+  end
+end
+
+local function work()
+  while true do
+    if not G.processOne() then os.pullEvent("gate_work") end
+  end
+end
+
+print("INCOMING gateway running.")
+parallel.waitForAny(N.rpc.pumpLoop, listen, work, function() N.rpc.serveLoop(handlers) end)
 ]=]
 F["roles/ingest/config.lua"] = [=[
 -- INGEST computer config: the only computer allowed to download schematics.
@@ -2972,6 +4048,8 @@ return {
 F["roles/outgoing/config.lua"] = [=[
 -- OUTGOING gateway config.
 return {
+  extSide = "top",  -- side the ENDER modem is on (talks to players' pockets and turtles)
+  busSide = "back", -- side the normal WIRELESS modem is on (talks to your base computers)
   frameMax = 8192, -- biggest message sent, in bytes
   queueMax = 256,  -- most replies waiting to be sent before new ones are dropped
   -- Logging: level is "debug", "info", "warn" or "error"; keepKB is how much log to keep on this computer.
@@ -2979,6 +4057,71 @@ return {
   -- How often (seconds) this computer tells the monitor room it is alive.
   heartbeatSecs = 5,
 }
+]=]
+F["roles/outgoing/gate.lua"] = [=[
+-- OUTGOING gateway logic: seals each reply for exactly one device and sends it out.
+-- It holds no list of devices: COMPUTE passes the device's public key with every reply.
+local ext = require("lib.extproto")
+local proto = require("lib.proto")
+
+local gate = {}
+local SEQ = 4096
+
+function gate.new(opts)
+  local crypto, cfg, clock = opts.crypto, opts.cfg, opts.clock
+  local last = 0
+  local G = { stats = { sent = 0, bad = 0, too_big = 0 } }
+
+  -- body = { d = { id, kxPk }, msg = response table }. Returns true or nil plus a reason.
+  function G.send(body)
+    local d, msg = body.d, body.msg
+    if type(d) ~= "table" or type(d.id) ~= "number" or type(d.kxPk) ~= "string" or #d.kxPk ~= 32
+        or not proto.validateResponse(msg) then
+      G.stats.bad = G.stats.bad + 1
+      return nil, "bad_request"
+    end
+    local counter = math.max(clock() * SEQ, last + 1)
+    last = counter
+    local frame = ext.sealResponse(crypto, opts.outSk, opts.outPk, d, counter, msg)
+    if #frame > cfg.frameMax then
+      G.stats.too_big = G.stats.too_big + 1
+      return nil, "too_big"
+    end
+    opts.transmit(frame)
+    G.stats.sent = G.stats.sent + 1
+    return true
+  end
+
+  return G
+end
+
+return gate
+]=]
+F["roles/outgoing/main.lua"] = [=[
+-- OUTGOING gateway program: the only computer that sends to players' devices.
+local node = require("lib.node")
+local proto = require("lib.proto")
+local gate = require("roles.outgoing.gate")
+
+local N = node.start("outgoing")
+local outSk, outPk = node.edgeKey("/bs/edge_key.txt")
+
+local G = gate.new({ crypto = N.crypto, cfg = N.cfg, clock = N.clock, outSk = outSk, outPk = outPk,
+  transmit = function(frame) N.ext.transmit(proto.CH.OUT, proto.CH.OUT, frame) end })
+
+local handlers = {
+  -- replies come from COMPUTE only
+  res = function(body, src)
+    if src ~= "compute" then return nil, "not_allowed" end
+    local ok, err = G.send(body)
+    if not ok then N.log.warn("outgoing", "reply not sent", { reason = err }) end
+  end,
+  pubkey = function() return { pk = outPk } end,
+  stats = function() return G.stats end,
+}
+
+print("OUTGOING gateway running.")
+parallel.waitForAny(N.rpc.pumpLoop, function() N.rpc.serveLoop(handlers) end)
 ]=]
 F["roles/pocket/config.lua"] = [=[
 -- POCKET app config.
@@ -2992,6 +4135,41 @@ return {
   heartbeatSecs = 5,
 }
 ]=]
+F["roles/pocket/main.lua"] = [=[
+-- POCKET program (Phase 3): registers at the owner's desk, then keeps a connection to the base.
+local crypto = require("lib.crypto")
+local devapp = require("lib.devapp")
+
+local modem
+for _, name in ipairs(peripheral.getNames()) do
+  if peripheral.getType(name) == "modem" and peripheral.call(name, "isWireless") then modem = peripheral.wrap(name) end
+end
+if not modem then error("this device needs an ender modem", 0) end
+
+term.clear()
+term.setCursorPos(1, 1)
+print("Starting...")
+if not crypto.ready() then crypto.initWithTiming() end
+
+local function show(lines)
+  term.clear()
+  for i, text in ipairs(lines) do
+    term.setCursorPos(1, i)
+    term.write(text)
+  end
+end
+
+local result = devapp.run({
+  fs = fs, settings = settings, crypto = crypto, modem = modem, kind = "pocket",
+  clock = function() return os.epoch("utc") end,
+  pull = os.pullEvent, startTimer = os.startTimer, show = show,
+  caps = term.setGraphicsMode and 2 or 1,
+})
+if result == "unlocked" then
+  term.setCursorPos(1, 4)
+  print("Type 'setup' for the setup screen.")
+end
+]=]
 F["roles/register/config.lua"] = [=[
 -- REGISTER terminal config.
 return {
@@ -3004,6 +4182,263 @@ return {
   -- How often (seconds) this computer tells the monitor room it is alive.
   heartbeatSecs = 5,
 }
+]=]
+F["roles/register/main.lua"] = [=[
+-- REGISTER desk program: pair pockets and turtles with players. Works only while the owner
+-- (config: owner) stands within detectRange of the Player Detector.
+local node = require("lib.node")
+local proto = require("lib.proto")
+local registrar = require("roles.register.registrar")
+
+local N = node.start("register")
+if N.cfg.owner == "CHANGE_ME" then
+  error("set your Minecraft name as 'owner' in /bs/role/config.lua, then reboot", 0)
+end
+
+local detector
+for _, name in ipairs(peripheral.getNames()) do
+  local ty = peripheral.getType(name)
+  if ty == "playerDetector" or ty == "player_detector" then detector = peripheral.wrap(name) end
+end
+if not detector then error("no Player Detector attached", 0) end
+
+local regSk, regPk = node.edgeKey("/bs/edge_key.txt")
+N.modem.open(proto.CH.ENROLL)
+
+local Rg = registrar.new({
+  crypto = N.crypto, rpc = N.rpc, clock = N.clock, cfg = N.cfg, regSk = regSk, regPk = regPk,
+  detector = function(range) return detector.getPlayersInRange(range) end,
+  transmit = function(frame) N.modem.transmit(proto.CH.ENROLL, proto.CH.ENROLL, frame) end,
+})
+
+local REASONS = {
+  owner_absent = "The owner must stand at the desk.",
+  no_such_code = "No device is showing that code. Is it switched on and close by?",
+  ambiguous = "Two devices claimed that code. Restart the device and try again.",
+  player_absent = "That player is not standing at the desk.",
+  timeout = "The base did not answer. Are COMPUTE and both gateways running?",
+}
+local function explain(err) return REASONS[err] or ("Failed: " .. tostring(err)) end
+
+local function pause()
+  print("")
+  write("Press Enter...")
+  read()
+end
+
+local function pick(title, options)
+  print(title)
+  for i, o in ipairs(options) do print(("  %d. %s"):format(i, o)) end
+  write("Number (Enter = cancel): ")
+  return options[tonumber(read())]
+end
+
+local function listDevices()
+  local res, err = Rg.list()
+  if not res then print(explain(err)); return nil end
+  if #res.devices == 0 then print("No devices registered yet."); return res.devices end
+  for _, d in ipairs(res.devices) do
+    print(("#%d %-6s %-16s %s%s"):format(d.id, d.kind, d.player, d.revoked == 1 and "REVOKED " or "",
+      d.unlock == 1 and "unlock-pending" or ""))
+  end
+  return res.devices
+end
+
+local function askId(prompt)
+  if not listDevices() then return nil end
+  write(prompt .. " (device number, Enter = cancel): ")
+  return tonumber(read())
+end
+
+local function menu()
+  while true do
+    term.clear()
+    term.setCursorPos(1, 1)
+    print("BuildKit registration desk")
+    print("Owner at desk: " .. (Rg.ownerPresent() and "yes" or "NO (" .. N.cfg.owner .. " must be here)"))
+    local waiting = Rg.pending()
+    print("Devices asking to register: " .. #waiting)
+    for _, p in ipairs(waiting) do print(("   %s %s  (%s)"):format(p.code:sub(1, 3), p.code:sub(4), p.kind)) end
+    print("")
+    print("1 Register a device   2 List devices")
+    print("3 Revoke a device     4 Restore a device")
+    print("5 Unlock a device     6 Refresh")
+    write("> ")
+    local choice = read()
+    print("")
+    if choice == "1" then
+      write("Code shown on the device: ")
+      local code = read():gsub("%s", "")
+      local players = Rg.players()
+      local player = #players > 0 and pick("Who is it for?", players)
+      if not player then
+        print(#players == 0 and "Nobody is standing at the desk." or "Cancelled.")
+      else
+        local res, err = Rg.approve(code, player)
+        if res then
+          print(("Registered %s #%d for %s."):format(res.kind, res.id, player))
+          print("Check number: " .. res.check)
+          print("The device must show the same number. If it does not, revoke it.")
+        else
+          print(explain(err))
+        end
+      end
+      pause()
+    elseif choice == "2" then
+      listDevices(); pause()
+    elseif choice == "3" or choice == "4" or choice == "5" then
+      local id = askId(choice == "3" and "Revoke" or choice == "4" and "Restore" or "Unlock")
+      if id then
+        local res, err
+        if choice == "3" then res, err = Rg.revoke(id)
+        elseif choice == "4" then res, err = Rg.restore(id)
+        else res, err = Rg.unlock(id, true) end
+        print(res and "Done." or explain(err))
+        if res and choice == "5" then print("The device opens up within a few seconds if it is on.") end
+      end
+      pause()
+    end
+  end
+end
+
+local function listen()
+  while true do
+    local _, _, channel, _, payload = os.pullEvent("modem_message")
+    if channel == proto.CH.ENROLL then Rg.onFrame(payload) end
+  end
+end
+
+parallel.waitForAny(N.rpc.pumpLoop, listen, menu)
+]=]
+F["roles/register/registrar.lua"] = [=[
+-- REGISTER desk logic: pairs new devices with players. Only works while the owner stands at the desk.
+local enroll = require("lib.enroll")
+
+local registrar = {}
+
+local PENDING_MAX, PENDING_MS = 16, 120000
+
+function registrar.new(opts)
+  local crypto, rpc, clock, cfg = opts.crypto, opts.rpc, opts.clock, opts.cfg
+  local pending = {}   -- code -> { req, at, dup }
+  local approved = {}  -- code -> { frame, at }  (re-sent if the device asks again)
+  local edge
+  local Rg = {}
+
+  local function expire()
+    local now = clock()
+    for code, p in pairs(pending) do
+      if now - p.at > PENDING_MS then pending[code] = nil end
+    end
+    for code, a in pairs(approved) do
+      if now - a.at > PENDING_MS then approved[code] = nil end
+    end
+  end
+
+  -- Names of players standing at the desk (from the Player Detector).
+  function Rg.players()
+    local ok, list = pcall(opts.detector, cfg.detectRange)
+    local names = {}
+    if ok and type(list) == "table" then
+      for _, p in ipairs(list) do
+        local name = type(p) == "table" and p.name or p
+        if type(name) == "string" then names[#names + 1] = name end
+      end
+    end
+    table.sort(names)
+    return names
+  end
+
+  function Rg.ownerPresent()
+    for _, name in ipairs(Rg.players()) do
+      if name == cfg.owner then return true end
+    end
+    return false
+  end
+
+  -- Feed every frame heard on the enrolment channel in here.
+  function Rg.onFrame(frame)
+    expire()
+    local req = enroll.parseRequest(frame)
+    if not req then return end
+    local code = enroll.code(crypto, req.signPk, req.kxPk, req.n)
+    if approved[code] then
+      if approved[code].signPk == req.signPk then opts.transmit(approved[code].frame) end
+      return
+    end
+    local p = pending[code]
+    if p then
+      -- same code from different keys: someone is trying to slip in. Refuse both.
+      if p.req.signPk ~= req.signPk or p.req.kxPk ~= req.kxPk then p.dup = true end
+      p.at = clock()
+      return
+    end
+    local n = 0
+    for _ in pairs(pending) do n = n + 1 end
+    if n >= PENDING_MAX then return end
+    pending[code] = { req = req, at = clock() }
+  end
+
+  -- Devices currently asking to be registered: { { code, kind, age } }.
+  function Rg.pending()
+    expire()
+    local out = {}
+    for code, p in pairs(pending) do
+      out[#out + 1] = { code = code, kind = p.req.kind, age = math.floor((clock() - p.at) / 1000) }
+    end
+    table.sort(out, function(a, b) return a.code < b.code end)
+    return out
+  end
+
+  local function edgeKeys()
+    if edge then return edge end
+    local i, e1 = rpc.call("incoming", "pubkey", {}, 5)
+    if not i then return nil, "incoming: " .. tostring(e1) end
+    local o, e2 = rpc.call("outgoing", "pubkey", {}, 5)
+    if not o then return nil, "outgoing: " .. tostring(e2) end
+    edge = { inPk = i.pk, outPk = o.pk }
+    return edge
+  end
+
+  -- Register the device showing `code` for `player`. Returns { id, check } or nil plus a reason.
+  function Rg.approve(code, player)
+    expire()
+    if not Rg.ownerPresent() then return nil, "owner_absent" end
+    code = tostring(code):gsub("%s", "")
+    local p = pending[code]
+    if not p then return nil, "no_such_code" end
+    if p.dup then pending[code] = nil; return nil, "ambiguous" end
+    local here = false
+    for _, name in ipairs(Rg.players()) do here = here or name == player end
+    if not here then return nil, "player_absent" end
+    local keys, err = edgeKeys()
+    if not keys then return nil, err end
+    local res, e = rpc.call("compute", "dev_add",
+      { kind = p.req.kind, player = player, signPk = p.req.signPk, kxPk = p.req.kxPk }, 40)
+    if not res then return nil, e end
+    local grant = { id = res.id, inPk = keys.inPk, outPk = keys.outPk, player = player }
+    local frame = enroll.reply(crypto, opts.regSk, opts.regPk, p.req, grant)
+    pending[code] = nil
+    approved[code] = { frame = frame, at = clock(), signPk = p.req.signPk }
+    opts.transmit(frame)
+    return { id = res.id, kind = p.req.kind,
+      check = enroll.checkNumber(crypto, grant, opts.regPk, p.req.signPk) }
+  end
+
+  local function admin(method, body)
+    if not Rg.ownerPresent() then return nil, "owner_absent" end
+    return rpc.call("compute", method, body, 40)
+  end
+
+  function Rg.list(player) return admin("dev_list", { player = player }) end
+  function Rg.revoke(id) return admin("dev_set", { id = id, revoked = 1 }) end
+  function Rg.restore(id) return admin("dev_set", { id = id, revoked = 0 }) end
+  function Rg.unlock(id, on) return admin("dev_set", { id = id, unlock = on and 1 or 0 }) end
+
+  return Rg
+end
+
+return registrar
 ]=]
 F["roles/storage/config.lua"] = [=[
 -- STORAGE manager config. Edit values, keep the shape. Bad values stop the program with a clear message.
@@ -4174,6 +5609,41 @@ return {
   -- How often (seconds) this computer tells the monitor room it is alive.
   heartbeatSecs = 5,
 }
+]=]
+F["roles/worker/main.lua"] = [=[
+-- WORKER program (Phase 3): registers at the owner's desk, then keeps a connection to the base.
+local crypto = require("lib.crypto")
+local devapp = require("lib.devapp")
+
+local modem
+for _, name in ipairs(peripheral.getNames()) do
+  if peripheral.getType(name) == "modem" and peripheral.call(name, "isWireless") then modem = peripheral.wrap(name) end
+end
+if not modem then error("this device needs an ender modem", 0) end
+
+term.clear()
+term.setCursorPos(1, 1)
+print("Starting...")
+if not crypto.ready() then crypto.initWithTiming() end
+
+local function show(lines)
+  term.clear()
+  for i, text in ipairs(lines) do
+    term.setCursorPos(1, i)
+    term.write(text)
+  end
+end
+
+local result = devapp.run({
+  fs = fs, settings = settings, crypto = crypto, modem = modem, kind = "worker",
+  clock = function() return os.epoch("utc") end,
+  pull = os.pullEvent, startTimer = os.startTimer, show = show,
+  caps = term.setGraphicsMode and 2 or 1,
+})
+if result == "unlocked" then
+  term.setCursorPos(1, 4)
+  print("Type 'setup' for the setup screen.")
+end
 ]=]
 F["vendor/ccryptolib/aead.lua"] = [=[
 --- The ChaCha20Poly1305AEAD authenticated encryption with associated data (AEAD) construction.
@@ -8095,15 +9565,16 @@ return {
 
 local DIR = "/bs-release"
 if fs.exists(DIR) then fs.delete(DIR) end
+-- This file is already loaded in memory, so delete it from the disk FIRST: the computer does not
+-- have room for the bundle and its unpacked copy at the same time.
+local me = shell.getRunningProgram()
+if me and fs.exists(me) then fs.delete(me) end
 for path, text in pairs(F) do
   local h = fs.open(DIR .. "/" .. path, "w")
   h.write(text)
   h.close()
 end
 F = nil
--- remove this bundle file now: the computer needs the disk space for the install
-local me = shell.getRunningProgram()
-if me and fs.exists(me) then fs.delete(me) end
 local ok
 if args[1] == "unpack" then
   print("Unpacked to " .. DIR)

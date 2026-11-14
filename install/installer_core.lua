@@ -76,6 +76,25 @@ function core.install(fs, fetch, manifest, role, opts)
   local yield = opts and opts.yield or function() end
 
   if fs.exists(STAGING) then fs.delete(STAGING) end
+
+  -- Skip files that are already installed and identical (saves disk space and time on upgrades).
+  local function unchanged(e)
+    if isRoleConfig(e.dest) or not fs.exists(e.dest) or fs.isDir(e.dest) or fs.getSize(e.dest) ~= e.size then
+      return false
+    end
+    local h = fs.open(e.dest, "rb")
+    if not h then return false end
+    local data = h.readAll()
+    h.close()
+    return sha256.hex(data) == e.sha256:lower()
+  end
+  local todo = {}
+  for _, e in ipairs(entries) do
+    if not unchanged(e) then todo[#todo + 1] = e end
+    yield()
+  end
+  entries = todo
+
   local need = 0
   for _, e in ipairs(entries) do need = need + e.size end
   if fs.getFreeSpace("/") < need + 1024 then

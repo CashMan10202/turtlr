@@ -108,7 +108,7 @@ function T.pocket_registers_then_talks_to_the_base()
   t.ok(screen:find("Owner: Steve", 1, true), screen)
   t.ok(screen:find("Check number: " .. res.check, 1, true), "check numbers differ:\n" .. screen)
   t.ok(screen:find("Server version 0.3.0", 1, true), screen)
-  -- the device locked itself and switched off booting from floppies
+  -- the device locked itself (only once it had really reached the base) and switched off floppy booting
   t.eq(lock.isLocked(d.e.fs), true)
   t.eq(d.settings["shell.allow_disk_startup"], false)
   -- the registry survives in storage
@@ -143,6 +143,20 @@ function T.registration_needs_the_owner_and_the_player_at_the_desk()
   t.eq(lock.isLocked(d.e.fs), false)
   w.atDesk = { "Cashman", "Steve" }
   t.ok(w.atRegister(function() return w.Rg.approve(d.code(), "Steve") end))
+end
+
+function T.device_does_not_lock_until_it_has_reached_the_base()
+  -- if the gateways are down, a freshly registered device must stay open so it cannot get stuck locked
+  local w = world()
+  w.incoming.node.kill()
+  local d = w.device("pocket1", "pocket")
+  w.waitFor(function()
+    for _, p in ipairs(w.Rg.pending()) do if p.code == d.code() then return true end end
+  end, "desk hears device")
+  -- INCOMING is down, so the desk cannot fetch its key: registration fails cleanly
+  local res, err = w.atRegister(function() return w.Rg.approve(d.code(), "Steve") end)
+  t.eq(res, nil); t.ok(tostring(err):find("incoming", 1, true), tostring(err))
+  t.eq(lock.isLocked(d.e.fs), false)
 end
 
 function T.revoked_device_is_cut_off_and_restore_brings_it_back()

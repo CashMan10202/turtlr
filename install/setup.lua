@@ -29,10 +29,22 @@ local function isBaseRole(role)
   return false
 end
 
+-- the registration desk only works for the owner; has their name been filled in yet?
+local function ownerUnset()
+  local h = fs.open("/bs/role/config.lua", "r")
+  if not h then return true end
+  local src = h.readAll()
+  h.close()
+  local fn = load(src, "=config", "t", {})
+  local ok, cfg = pcall(fn or error)
+  return not ok or type(cfg) ~= "table" or cfg.owner == nil or cfg.owner == "CHANGE_ME"
+end
+
 local function getState()
   local inst = core.installed(fs)
   local role = inst and inst.role
   return {
+    ownerUnset = role == "register" and ownerUnset(),
     release = findRelease() ~= nil,
     role = role, version = inst and inst.version,
     isBase = role ~= nil and isBaseRole(role),
@@ -207,6 +219,30 @@ local function doVerify()
   if picked.flag then run("verify", picked.flag) else run("verify") end
 end
 
+local function doOwner()
+  local config = require("lib.config")
+  local specs = require("lib.config_specs")
+  local cfg, err = config.load(fs, "/bs/role/config.lua", specs.register)
+  if not cfg then return message({ "The config file has a problem:", tostring(err) }, colours.red) end
+  clear()
+  print("Your Minecraft name, exactly as it")
+  print("appears in chat (capitals matter).")
+  print("Only this player can register devices.")
+  print("")
+  write("Name: ")
+  local name = read()
+  if not name:find("^[A-Za-z0-9_]+$") or #name > 16 then
+    return message({ "That is not a valid Minecraft name.", "Nothing was changed." }, colours.red)
+  end
+  cfg.owner = name
+  local ok, saveErr = config.save(fs, "/bs/role/config.lua", cfg)
+  if ok then
+    message({ "Owner set to " .. name .. ".", "", "Reboot for it to take effect." }, colours.lime)
+  else
+    message({ "Could not save:", tostring(saveErr) }, colours.red)
+  end
+end
+
 local function doGetRelease()
   message({ "This computer has no release files.", "",
     "Drag buildkit.lua from your PC onto this screen, then type:", "", "  buildkit" }, colours.white)
@@ -220,6 +256,7 @@ while true do
   if picked.id == "install" then doInstall()
   elseif picked.id == "getrelease" then doGetRelease()
   elseif picked.id == "verify" then doVerify()
+  elseif picked.id == "owner" then doOwner()
   elseif picked.id == "mkkeys" then run("mkkeys")
   elseif picked.id == "loadkeys" then run("mkkeys", "load", state.role)
   elseif picked.id == "storetest" then run("storetest")

@@ -4,7 +4,7 @@ A CC: Tweaked build service for Minecraft 1.21.1 (NeoForge). Players request a b
 pocket computer; a locked turtle at their site finds materials, crafts what it needs and builds it.
 All data and planning live on the owner's base computers.
 
-Status: **Phase 2 of 10** (storage works). Nothing moves a turtle yet.
+Status: **Phase 3 of 10** (storage, gateways, registration, locked devices). Nothing moves a turtle yet.
 
 ## Where things are
 
@@ -21,7 +21,7 @@ Status: **Phase 2 of 10** (storage works). Nothing moves a turtle yet.
 ## Start here
 
 - What it is and why: `docs/superpowers/specs/2026-11-13-build-service-design.md`
-- Deploy and test in-game: `docs/phase1-deploy.md`, `docs/phase2-deploy.md`
+- Deploy and test in-game: `docs/ingame-test.md`, `docs/phase2-deploy.md`, `docs/phase3-deploy.md`
 - Storage recovery: `docs/recovery.md`
 - Every message and its allowed fields: `docs/protocol.md`
 
