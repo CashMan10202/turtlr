@@ -7,13 +7,17 @@ local args = { ... }
 -- Find where this installer lives so it can load its helper files from the same release.
 local here = fs.getDir(shell.getRunningProgram())      -- .../install
 local root = fs.getDir(here)                           -- release root
+if here == "" or here == ".." or root == ".." then root = "" end
 package.path = "/" .. root .. "/?.lua;" .. package.path
 
 local role, url = args[1], args[2]
 
 -- Web installs start with only this file, so fetch the two helper files it needs first.
-if url and not fs.exists("/" .. root .. "/install/installer_core.lua") then
+if url then
   if not http then error("HTTP is disabled on this server", 0) end
+  if url:sub(1, 8) ~= "https://" then error("the address must start with https://", 0) end
+end
+if url and not fs.exists("/" .. root .. "/install/installer_core.lua") then
   local base = url:sub(-1) == "/" and url or url .. "/"
   for _, path in ipairs({ "install/installer_core.lua", "lib/sha256.lua" }) do
     local res, err = http.get(base .. path)
@@ -27,8 +31,6 @@ end
 local core = require("install.installer_core")
 local fetch
 if url then
-  if not http then error("HTTP is disabled on this server", 0) end
-  if url:sub(1, 8) ~= "https://" then error("the address must start with https://", 0) end
   fetch = core.fetchers.http(http, url)
 else
   fetch = core.fetchers.disk(fs, "/" .. root)
@@ -59,6 +61,7 @@ end
 
 print("Installing " .. role .. " " .. manifest.version .. " ...")
 local ok, err = core.install(fs, fetch, manifest, role, { yield = function() sleep(0) end })
+if fs.exists("/bs/.boot") then fs.delete("/bs/.boot") end
 if not ok then
   printError("Install failed, nothing was changed: " .. tostring(err))
   return

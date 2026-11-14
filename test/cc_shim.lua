@@ -118,7 +118,8 @@ function shim.new()
     }
   end
   fs.combine = function(a, b) return norm(a .. "/" .. b) end
-  fs.getDir = function(p) return parent(norm(p)) end
+  -- like real CC: the parent of the root is ".."
+  fs.getDir = function(p) p = norm(p); if p == "" then return ".." end; return parent(p) end
   env.fs = fs
 
   env.os = { epoch = function() return now end, clock = function() return now / 1000 end }

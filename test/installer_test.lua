@@ -159,4 +159,22 @@ function T.http_fetcher_reads_and_reports_errors()
   t.eq(v, nil); t.ok(err:find("missing", 1, true))
 end
 
+function T.interrupted_swap_leaves_the_marker_so_startup_refuses()
+  local e, fetch = setup()
+  oldInstall(e)
+  local realMove, n = e.fs.move, 0
+  e.fs.move = function(a, b)
+    n = n + 1
+    if n == 2 then error("power lost") end
+    return realMove(a, b)
+  end
+  t.ok(not pcall(core.install, e.fs, fetch, manifest(), "compute"))
+  t.ok(e.fs.exists("/bs/.installing"))
+  -- running the installer again repairs it
+  e.fs.move = realMove
+  t.ok(core.install(e.fs, fetch, manifest(), "compute"))
+  t.ok(not e.fs.exists("/bs/.installing"))
+  t.eq(e.read("/bs/role/main.lua"), src["roles/compute/main.lua"])
+end
+
 return T
