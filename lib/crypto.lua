@@ -4,6 +4,8 @@
 local random = require("ccryptolib.random")
 local blake3 = require("ccryptolib.blake3")
 local aead = require("ccryptolib.aead")
+local ed25519 = require("ccryptolib.ed25519")
+local x25519 = require("ccryptolib.x25519")
 
 local crypto = {}
 
@@ -61,5 +63,31 @@ function crypto.open(key, counter, sealed, aad)
   if ok then return plain end
   return nil
 end
+
+-- Signatures (Ed25519): prove who wrote a message. Returns secretKey, publicKey.
+function crypto.signKeypair()
+  local sk = crypto.random(32)
+  return sk, ed25519.publicKey(sk)
+end
+
+function crypto.sign(sk, pk, msg) return ed25519.sign(sk, pk, msg) end
+
+-- Never throws: malformed keys or signatures simply do not verify.
+function crypto.verify(pk, msg, sig)
+  if type(pk) ~= "string" or #pk ~= 32 or type(sig) ~= "string" or #sig ~= 64 or type(msg) ~= "string" then
+    return false
+  end
+  local ok, good = pcall(ed25519.verify, pk, msg, sig)
+  return ok and good == true
+end
+
+-- Key agreement (X25519): two sides derive the same secret from their own secret key and the
+-- other's public key. Returns secretKey, publicKey.
+function crypto.kxKeypair()
+  local sk = crypto.random(32)
+  return sk, x25519.publicKey(sk)
+end
+
+function crypto.exchange(sk, pk) return x25519.exchange(sk, pk) end
 
 return crypto
