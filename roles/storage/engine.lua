@@ -47,8 +47,31 @@ function engine.new(opts)
   local devOk = {}    -- name -> false when the last load failed
   local byKey = {}    -- k -> { [name .. "/" .. cellId] = { dev = name, id = cellId, meta = meta } }
   local index = {}    -- k -> { ver, n, size, shards = { [i] = { hash, devs = { name... } } } }
-  local stats = { lost = 0 }
+  local lost = {}      -- k -> true when every copy of some shard is gone
+  local degraded = {}  -- k -> true when a key may have fewer copies than wanted
   local locked = false
+  local fromSnapshot = false
+  local scrubPos = 0
+  local hot, cacheMax = opts.hot or {}, opts.cacheBytes or 262144
+  local cache, cacheUse, cacheBytes, cacheTick = {}, {}, 0, 0
+
+  local function cacheDrop(k)
+    if cache[k] then cacheBytes = cacheBytes - #cache[k]; cache[k], cacheUse[k] = nil, nil end
+  end
+
+  local function cachePut(k, value)
+    cacheDrop(k)
+    if not hot[k:match("^[a-z]+")] or #value > cacheMax then return end
+    cacheTick = cacheTick + 1
+    cache[k], cacheUse[k], cacheBytes = value, cacheTick, cacheBytes + #value
+    while cacheBytes > cacheMax do
+      local oldest
+      for key, tick in pairs(cacheUse) do
+        if not oldest or tick < cacheUse[oldest] then oldest = key end
+      end
+      cacheDrop(oldest)
+    end
+  end
 
   local E = {}
 
@@ -197,7 +220,25 @@ function engine.new(opts)
     local clean = removeRefs(stale)
     if not entry and #tombs > 0 and clean and allDevicesReadable() then removeRefs(tombs) end
     index[k] = entry
+    cacheDrop(k)
+    lost[k] = nil
     return entry
+  end
+
+  local function readyCount()
+    local n = 0
+    for _, name in ipairs(order) do
+      if devOk[name] then n = n + 1 end
+    end
+    return n
+  end
+
+  local function underReplicated(entry)
+    local want = math.min(replicas, readyCount())
+    for i = 1, entry.n do
+      if #entry.shards[i].devs < want then return true end
+    end
+    return false
   end
 
   -- Choose devices for a set of cells. sizes[i] = bytes of cell i. Returns { [i] = { name... } } or nil.
@@ -225,14 +266,6 @@ function engine.new(opts)
       plan[i] = picked
     end
     return plan
-  end
-
-  local function readyCount()
-    local n = 0
-    for _, name in ipairs(order) do
-      if devOk[name] then n = n + 1 end
-    end
-    return n
   end
 
   -- Write a set of new cells: cells[i] = { id, text }. Returns true or nil, err; on error nothing new remains.
@@ -280,7 +313,9 @@ function engine.new(opts)
   end
 
   -- Scan every device and rebuild the index. Run at boot and after taking over as primary.
-  E.rebuild = guarded(function()
+  local function rebuildInner()
+    fromSnapshot = false
+    lost, degraded, cache, cacheUse, cacheBytes = {}, {}, {}, {}, 0
     local report = { devices = #order, unreadable = 0, cells = 0, keys = 0, removed = 0 }
     byKey, index = {}, {}
     for _, name in ipairs(order) do dir[name] = {} end
@@ -301,13 +336,18 @@ function engine.new(opts)
     for _, k in ipairs(keys) do
       local _, stale = resolve(k)
       report.removed = report.removed + #stale
-      if settle(k) then report.keys = report.keys + 1 end
+      local entry = settle(k)
+      if entry then
+        report.keys = report.keys + 1
+        if underReplicated(entry) then degraded[k] = true end
+      end
     end
     for _, name in ipairs(order) do
       for _ in pairs(dir[name]) do report.cells = report.cells + 1 end
     end
     return report
-  end)
+  end
+  E.rebuild = guarded(rebuildInner)
 
   E.put = guarded(function(ns, key, value)
     local k = checkName(ns, key)
@@ -330,11 +370,14 @@ function engine.new(opts)
     return true
   end)
 
-  E.get = guarded(function(ns, key)
-    local k = checkName(ns, key)
-    if not k then return nil, "bad_key" end
+  local function getInner(k)
     local entry = index[k]
     if not entry then return nil, "not_found" end
+    if cache[k] then
+      cacheTick = cacheTick + 1
+      cacheUse[k] = cacheTick
+      return cache[k]
+    end
     local parts, loaded = {}, {}
     for i = 1, entry.n do
       local sh, id = entry.shards[i], cellId(k, entry.ver, i)
@@ -349,10 +392,25 @@ function engine.new(opts)
           local data = meta and base64.decode(cell:sub(nl + 1))
           if data and crypto.hashHex(data) == sh.hash then parts[i] = data; break end
         end
+        degraded[k] = true -- this copy was missing or damaged; scrub will repair it
       end
       if not parts[i] then return nil, "corrupt" end
     end
-    return table.concat(parts)
+    local value = table.concat(parts)
+    cachePut(k, value)
+    return value
+  end
+
+  E.get = guarded(function(ns, key)
+    local k = checkName(ns, key)
+    if not k then return nil, "bad_key" end
+    local value, err = getInner(k)
+    if value == nil and fromSnapshot then
+      -- the boot snapshot may be out of date: scan for real, then try once more
+      rebuildInner()
+      value, err = getInner(k)
+    end
+    return value, err
   end)
 
   E.delete = guarded(function(ns, key)
@@ -391,6 +449,293 @@ function engine.new(opts)
     if not entry then return nil end
     return { size = entry.size, ver = entry.ver, shards = entry.n }
   end
+
+  ---------------------------------------------------------------------------
+  -- Maintenance
+  ---------------------------------------------------------------------------
+
+  -- Read one cell from a device and return its text only if its data matches its hash.
+  local function readGoodCell(name, id, hash)
+    local cells = devices[name] and devices[name].load()
+    yield()
+    local cell = cells and cells[id]
+    if not cell then return nil end
+    local meta, nl = parseHeader(cell)
+    local data = meta and base64.decode(cell:sub(nl + 1))
+    if data and crypto.hashHex(data) == hash then return cell end
+    mutate(name, nil, { id }) -- damaged copy: remove it so it is not counted any more
+    return nil
+  end
+
+  -- Make sure every shard of k has enough copies. Returns copies created, and true if the key is lost.
+  local function repair(k)
+    local entry = resolve(k)
+    if not entry then
+      -- no complete version left: if we knew this key, its data is gone
+      if index[k] and not lost[k] then lost[k] = true; cacheDrop(k); return 0, true end
+      return 0, false
+    end
+    index[k] = entry
+    local want = math.min(replicas, readyCount())
+    local made, gone = 0, false
+    for i = 1, entry.n do
+      local sh, id = entry.shards[i], cellId(k, entry.ver, i)
+      if #sh.devs < want then
+        local cell
+        for _, name in ipairs(sh.devs) do
+          cell = readGoodCell(name, id, sh.hash)
+          if cell then break end
+        end
+        if not cell then
+          gone = true
+        else
+          local holders = {}
+          for _, name in ipairs(sh.devs) do holders[name] = true end
+          for _ = #sh.devs + 1, want do
+            local best
+            for _, name in ipairs(order) do
+              if devOk[name] and not holders[name] and deviceMax - used[name] >= #id + #cell
+                  and (not best or used[name] < used[best]) then
+                best = name
+              end
+            end
+            if not best or not mutate(best, { [id] = cell }, nil, true) then break end
+            holders[best] = true
+            made = made + 1
+          end
+        end
+      end
+    end
+    local after = resolve(k)
+    if gone or not after then
+      local newly = not lost[k]
+      lost[k] = true
+      cacheDrop(k)
+      return made, newly
+    end
+    index[k] = after
+    if not underReplicated(after) then degraded[k] = nil end
+    return made, false
+  end
+
+  -- Check one device (round-robin): verify every cell, drop damaged ones, then repair any key that
+  -- is short of copies. Call regularly from the server's idle loop.
+  E.scrubStep = guarded(function()
+    local report = { checked = 0, bad = 0, repaired = 0, lost = 0 }
+    if #order == 0 then return report end
+    scrubPos = scrubPos % #order + 1
+    local name = order[scrubPos]
+    report.device = name
+    local affected = {}
+    for _, meta in pairs(dir[name]) do affected[meta.k] = true end
+    local cells = devices[name].load()
+    yield()
+    if not cells then
+      devOk[name] = false
+      report.error = "io"
+      return report
+    end
+    local bad = refresh(name, cells)
+    for id, meta in pairs(dir[name]) do
+      report.checked = report.checked + 1
+      affected[meta.k] = true
+      if meta.flag == "d" then
+        local data = base64.decode(cells[id]:sub((cells[id]:find("\n", 1, true)) + 1))
+        if not data or crypto.hashHex(data) ~= meta.hash then bad[#bad + 1] = id end
+      end
+      yield()
+    end
+    report.bad = #bad
+    if #bad > 0 then mutate(name, nil, bad) end
+    for k in pairs(degraded) do affected[k] = true end
+    local keys = {}
+    for k in pairs(affected) do keys[#keys + 1] = k end
+    table.sort(keys)
+    for _, k in ipairs(keys) do
+      if index[k] then
+        local made, newlyLost = repair(k)
+        report.repaired = report.repaired + made
+        if newlyLost then report.lost = report.lost + 1 end
+      end
+    end
+    return report
+  end)
+
+  -- Move cells from the fullest device to the emptiest until fill differs by 30 % or less.
+  E.rebalance = guarded(function(maxMoves)
+    maxMoves = maxMoves or 200
+    local moved = 0
+    while moved < maxMoves do
+      local hi, lo
+      for _, name in ipairs(order) do
+        if devOk[name] then
+          if not hi or used[name] > used[hi] then hi = name end
+          if not lo or used[name] < used[lo] then lo = name end
+        end
+      end
+      if not hi or hi == lo or (used[hi] - used[lo]) / deviceMax <= 0.3 then break end
+      -- pick cells to move: not already on the target, total at most half the difference
+      local budget, ids = (used[hi] - used[lo]) / 2, {}
+      for id, meta in pairs(dir[hi]) do
+        if not dir[lo][id] and meta.bytes <= budget and moved + #ids < maxMoves then
+          ids[#ids + 1] = id
+          budget = budget - meta.bytes
+        end
+      end
+      if #ids == 0 then break end
+      local cells = devices[hi].load()
+      yield()
+      if not cells then devOk[hi] = false; break end
+      local add, keys = {}, {}
+      for _, id in ipairs(ids) do
+        add[id] = cells[id]
+        keys[dir[hi][id].k] = true
+      end
+      if not mutate(lo, add, nil, true) then break end
+      local removed = mutate(hi, nil, ids)
+      -- the copies moved: point the index at where they are now
+      for k in pairs(keys) do
+        local entry = resolve(k)
+        if entry then index[k] = entry end
+      end
+      if not removed then break end
+      moved = moved + #ids
+    end
+    return moved
+  end)
+
+  local function resettleDevice(name)
+    local keys = {}
+    for _, meta in pairs(dir[name]) do keys[meta.k] = true end
+    for k in pairs(keys) do
+      local entry = resolve(k)
+      if entry then
+        index[k] = entry
+        if underReplicated(entry) then degraded[k] = true end
+      end
+    end
+  end
+
+  -- Start using another NBT Storage block.
+  E.addDevice = guarded(function(D)
+    if devices[D.name] then return nil, "exists" end
+    addDevice(D)
+    local cells = D.load()
+    if not cells then devOk[D.name] = false; return true end
+    refresh(D.name, cells)
+    resettleDevice(D.name)
+    return true
+  end)
+
+  -- Stop using a block: its cells are copied to other devices first.
+  E.removeDevice = guarded(function(name)
+    if not devices[name] then return nil, "not_found" end
+    local cells = devices[name].load()
+    yield()
+    if not cells then return nil, "io" end
+    refresh(name, cells)
+    -- plan a new home for every cell that would otherwise lose a copy
+    local free, per = {}, {}
+    for _, other in ipairs(order) do
+      if other ~= name and devOk[other] then free[other] = deviceMax - used[other] end
+    end
+    local ids = {}
+    for id in pairs(dir[name]) do ids[#ids + 1] = id end
+    table.sort(ids)
+    for _, id in ipairs(ids) do
+      local bytes, best = dir[name][id].bytes
+      for _, other in ipairs(order) do
+        if free[other] and free[other] >= bytes and not dir[other][id]
+            and (not best or free[other] > free[best]) then
+          best = other
+        end
+      end
+      if not best then return nil, "no_space" end
+      free[best] = free[best] - bytes
+      per[best] = per[best] or {}
+      per[best][id] = cells[id]
+    end
+    for _, other in ipairs(order) do
+      if per[other] and not mutate(other, per[other], nil, true) then return nil, "io" end
+    end
+    devices[name].store({})
+    local keys = {}
+    for _, meta in pairs(dir[name]) do keys[meta.k] = true end
+    refresh(name, {})
+    devices[name], dir[name], used[name], devOk[name] = nil, nil, nil, nil
+    for i, n in ipairs(order) do
+      if n == name then table.remove(order, i); break end
+    end
+    for k in pairs(keys) do
+      local entry = resolve(k)
+      if entry then index[k] = entry end
+    end
+    return true
+  end)
+
+  function E.health()
+    local h = { devices = {}, keys = 0, bytes = 0, used = 0, capacity = #order * deviceMax,
+      degraded = 0, lost = 0, cacheBytes = cacheBytes }
+    for _, name in ipairs(order) do
+      local cells = 0
+      for _ in pairs(dir[name]) do cells = cells + 1 end
+      h.devices[#h.devices + 1] = { name = name, used = used[name], cells = cells,
+        errors = devices[name].errors, ok = devOk[name] }
+      h.used = h.used + used[name]
+    end
+    for k, entry in pairs(index) do
+      h.keys = h.keys + 1
+      h.bytes = h.bytes + entry.size
+      if lost[k] then
+        h.lost = h.lost + 1
+      elseif underReplicated(entry) then
+        h.degraded = h.degraded + 1
+      end
+    end
+    return h
+  end
+
+  -- The index as text, to save on local disk so the next boot can skip the full scan.
+  function E.snapshot()
+    local lines = { "BKSNAP 1" }
+    for _, name in ipairs(order) do
+      local ids = {}
+      for id in pairs(dir[name]) do ids[#ids + 1] = id end
+      table.sort(ids)
+      for _, id in ipairs(ids) do
+        local m = dir[name][id]
+        lines[#lines + 1] = table.concat({ name, id, m.k, m.ver, m.i, m.n, m.size, m.hash, m.flag, m.bytes }, "|")
+      end
+    end
+    return table.concat(lines, "\n") .. "\n"
+  end
+
+  -- Load a snapshot instead of scanning. Returns true, or nil if the text is not a valid snapshot
+  -- (then call rebuild). A snapshot that turns out to be out of date triggers a rebuild on first miss.
+  E.loadSnapshot = guarded(function(text)
+    if type(text) ~= "string" or text:sub(1, 9) ~= "BKSNAP 1\n" then return nil end
+    local parsed = {}
+    for line in text:sub(10):gmatch("[^\n]+") do
+      local name, id, k, ver, i, n, size, hash, flag, bytes = line:match(
+        "^([^|]+)|(c%x+)|([a-z]+/[A-Za-z0-9_.:-]+)|(%d+)|(%d+)|(%d+)|(%d+)|([0-9a-f-]+)|([dx])|(%d+)$")
+      if not name then return nil end
+      parsed[#parsed + 1] = { name = name, id = id, meta = { k = k, ver = tonumber(ver), i = tonumber(i),
+        n = tonumber(n), size = tonumber(size), hash = hash, flag = flag, bytes = tonumber(bytes) } }
+    end
+    byKey, index, lost, degraded = {}, {}, {}, {}
+    for _, name in ipairs(order) do dir[name], used[name] = {}, 0 end
+    for _, p in ipairs(parsed) do
+      if devices[p.name] then
+        dir[p.name][p.id] = p.meta
+        used[p.name] = used[p.name] + p.meta.bytes
+        byKey[p.meta.k] = byKey[p.meta.k] or {}
+        byKey[p.meta.k][p.name .. "/" .. p.id] = { dev = p.name, id = p.id, meta = p.meta }
+      end
+    end
+    for k in pairs(byKey) do index[k] = resolve(k) end
+    fromSnapshot = true
+    return true
+  end)
 
   return E
 end
