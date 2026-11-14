@@ -18,6 +18,9 @@ function crypto.initWithTiming() random.initWithTiming() end
 
 function crypto.ready() return random.isInit() end
 
+-- Stir extra unpredictable data (e.g. keystroke timings) into the generator.
+function crypto.mix(data) random.mix(data) end
+
 function crypto.random(n)
   if not random.isInit() then error("crypto.random used before crypto.init", 2) end
   return random.random(n)

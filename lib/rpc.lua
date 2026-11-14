@@ -10,6 +10,9 @@ local rpc = {}
 
 local INBOX_MAX = 64
 
+-- A handler returns this to send no reply at all (e.g. a standby server staying silent).
+rpc.NOREPLY = {}
+
 function rpc.new(opts)
   local B, pull, startTimer, queueEvent = opts.bus, opts.pull, opts.startTimer, opts.queueEvent
   local nextId = opts.clock() % 1000000 * 1000
@@ -73,7 +76,7 @@ function rpc.new(opts)
         res, code = nil, "internal"
       end
     end
-    if msg.k ~= "q" then return end
+    if msg.k ~= "q" or res == rpc.NOREPLY then return end
     if res ~= nil then
       local sent = B.send(got.src, { k = "r", id = msg.id, ok = 1, b = res })
       if not sent then B.send(got.src, { k = "r", id = msg.id, ok = 0, e = "too_big" }) end
