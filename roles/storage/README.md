@@ -4,7 +4,10 @@
 
 **Hardware:** Advanced computer, wired modem network to the NBT Storage blocks, wireless modem. Run at least two.
 
-**Program:** `/bs/role/main.lua` (arrives in Phase 2). In Phase 1 this role only has its config.
+**Program:** `/bs/role/main.lua`. Files: `device.lua` (one NBT Storage block), `engine.lua` (the replicated store),
+`server.lua` (network service, primary/standby, background checks).
+
+**Deploy and test:** `docs/phase2-deploy.md`. **When things break:** `docs/recovery.md`.
 
 **Config:** `/bs/role/config.lua`. Each key is explained by a comment in the file; allowed ranges are in
 `lib/config_specs.lua`. A bad value stops the program at start with a message naming the key.

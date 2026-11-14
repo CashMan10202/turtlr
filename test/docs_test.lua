@@ -33,6 +33,9 @@ function T.top_level_docs_exist()
   t.ok(read("README.md"))
   local deploy = read("docs/phase1-deploy.md")
   t.ok(deploy and deploy:find("verify", 1, true) and deploy:find("mkrelease", 1, true))
+  local p2 = read("docs/phase2-deploy.md")
+  t.ok(p2 and p2:find("mkkeys", 1, true) and p2:find("storetest", 1, true))
+  t.ok(read("docs/recovery.md"))
 end
 
 return T

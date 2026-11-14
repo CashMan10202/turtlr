@@ -41,7 +41,7 @@ class MkReleaseTest(unittest.TestCase):
             self.assertIn("/bs/ccryptolib/internal/util.lua", dests)
             for dest in dests:
                 self.assertTrue(dest.endswith(".lua"), dest)
-                self.assertNotIn("test", dest)
+                self.assertFalse(dest.startswith("/bs/test/"), dest)
 
     def test_no_other_roles_files_leak(self):
         for e in self.manifest["roles"]["pocket"]:
